@@ -1,0 +1,34 @@
+{
+  "esp32-cam-01": {
+    "model": "ESP32-CAM",
+    "solution_track": 1,
+    "owner": "Vy",
+    "firmware": "open",
+    "status": "live",
+    "notes": "Live device. Solution 1 — OTA patch pipeline."
+  },
+  "esp32-cam-02": {
+    "model": "ESP32-CAM",
+    "solution_track": 1,
+    "owner": "Vy",
+    "firmware": "open",
+    "status": "bench-ready",
+    "notes": "Bench-ready. Unflashed. Proves pipeline scales horizontally — same code path, no changes needed."
+  },
+  "esp32-cam-03": {
+    "model": "ESP32-CAM",
+    "solution_track": 1,
+    "owner": "Vy",
+    "firmware": "open",
+    "status": "bench-ready",
+    "notes": "Bench-ready. Unflashed. Proves pipeline scales horizontally — same code path, no changes needed."
+  },
+  "tapo-c200-01": {
+    "model": "TP-Link Tapo C200",
+    "solution_track": 2,
+    "owner": "Duc",
+    "firmware": "closed",
+    "status": "live",
+    "notes": "Reference device for Solution 2 — three-source network whitelist. Set 'ip' to the camera's DHCP lease (192.168.4.10-50 on the AP) or export AES_DEVICE_IP_TAPO_C200_01. Hikvision/Reolink are one-config-file extensions when hardware arrives."
+  }
+}

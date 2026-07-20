@@ -1,0 +1,12 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Real telemetry counters (see main.c sample_cpu_percent / sample_packet_rate):
+# FreeRTOS run-time stats with a 64-bit counter give windowed CPU utilisation,
+# and lwIP stats expose link-layer RX/TX packet counts for packet_rate.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64=y
+CONFIG_LWIP_STATS=y

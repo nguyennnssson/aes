@@ -1,0 +1,19 @@
+# AES Python dependencies.
+#
+# Version bounds below are CONSERVATIVE major-version caps to stop a silent
+# breaking bump (chromadb in particular churns its API) — they are NOT exact
+# pins. On a working install, tighten them to what you actually run:
+#   pip freeze | grep -iE 'openai|chromadb|paho|requests|dotenv|fastapi|uvicorn'
+# and replace `>=x,<y` with `~=` on the frozen versions.
+
+# Core pipeline
+openai>=1.40,<2.0            # Hermes reasoning (GPT-5) + patch generation (Codex / gpt-5-codex)
+chromadb>=0.5,<2.0           # Intel Agent vector store — CVE knowledge base
+paho-mqtt>=1.6,<3.0          # MQTT — 1.x and 2.x both supported via agents/mqtt_compat.py
+requests>=2.31,<3.0          # Discord webhook + RAG ingestion HTTP calls
+python-dotenv>=1.0,<2.0      # Loads .env file into environment variables
+fastapi>=0.110,<1.0          # Local dashboard — web API
+uvicorn[standard]>=0.29,<1.0 # Local dashboard — ASGI server
+
+# Development / testing only
+pytest>=8.0,<9.0             # Unit test suite (tests/)

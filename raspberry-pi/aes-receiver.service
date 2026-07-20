@@ -1,0 +1,15 @@
+[Unit]
+Description=AES Telemetry Receiver
+After=mosquitto.service network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/aes/raspberry-pi/receiver.py
+WorkingDirectory=/home/pi/aes
+Restart=always
+RestartSec=5
+User=pi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

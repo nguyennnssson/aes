@@ -1,0 +1,31 @@
+rules:
+  - id: esp32-cwe119-buffer-overflow
+    pattern: strcpy($DEST, $SRC)
+    message: "CRITICAL: Detected unsafe 'strcpy' (CWE-119). Potential buffer overflow on ESP32 flash! Use 'strlcpy' or 'strncpy' instead."
+    languages: [c]
+    severity: ERROR
+
+  - id: esp32-cwe416-use-after-free
+    patterns:
+      - pattern: free($PTR);
+      - pattern-not: |
+          free($PTR);
+          ...
+          $PTR = NULL;
+    message: "WARNING: Detected potential Use-After-Free (CWE-416). Object accessed after free() without nullifying pointer."
+    languages: [c]
+    severity: ERROR
+
+  - id: esp32-cwe78-command-injection
+    pattern: system($CMD)
+    message: "CRITICAL: Detected unsafe 'system' call (CWE-78). Remote command injection risk on gateway interface!"
+    languages: [c]
+    severity: ERROR
+
+  - id: esp32-cwe798-hardcoded-credentials
+    pattern-either:
+      - pattern-regex: '(?i)(password|passwd|secret|wifi_pass)\s*=\s*".+"'
+      - pattern-regex: '(?i)#define\s+\w*(PASS|PASSWD|PASSWORD|SECRET|KEY|TOKEN)\w*\s+".+"'
+    message: "CRITICAL: Hardcoded credentials detected (CWE-798). WiFi passwords or private keys must not be stored in plain text source!"
+    languages: [c]
+    severity: ERROR

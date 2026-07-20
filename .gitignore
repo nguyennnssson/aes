@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+.venv/
+
+# Isolated semgrep venv for Gate 1 (semgrep's deps conflict with chromadb, so it
+# is kept out of the main env — recreate with: python -m venv .tools/semgrep-venv
+# && .tools/semgrep-venv/Scripts/pip install semgrep)
+.tools/
+
+# ChromaDB data (large, regenerate with ingest_nvd.py)
+aes_chromadb/
+
+# Incident logs + false-positive corpus (runtime data, not source)
+aes_incidents.jsonl
+aes_incidents.hashes
+aes_incidents.jsonl.tmp
+aes_normals.jsonl
+
+# Solution 3 runtime state (created on first inject — monitor falls back to defaults if absent)
+config/active_detection.json
+config/active_detection.json.tmp
+config/previous_detection.json
+config/skills.jsonl
+config/fleet_status.json
+config/fleet_status.json.tmp
+# Demo/sim runtime state (written while the simulator runs — not source)
+config/demo_control.json
+config/sim_state.json
+
+# NOTE: config/ewma_baseline.json is intentionally COMMITTED — it is the pre-seeded
+# baseline that prevents cold-start poisoning. The monitor updates it at runtime;
+# if that churn is noisy, run: git update-index --assume-unchanged config/ewma_baseline.json
+
+# Pipeline runtime artifacts (generated per incident — not source)
+outputs/patches/pending/
+outputs/patches/failed/
+outputs/firewall/
+outputs/gate2/
+
+# Environment / secrets
+.env
+*.env
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Local live-bench dev tooling (serial bridge / fleet updater) and Playwright E2E deps
+.live/
+tests/e2e/node_modules/
+tests/e2e/artifacts/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+
+# ESP-IDF firmware build artifacts (regenerate with `idf.py build` — never commit)
+esp32-cam/build/
+esp32-cam/sdkconfig.old
+# Per-build firmware secrets (WiFi password etc.) — see main/Kconfig.projbuild
+esp32-cam/sdkconfig.secrets
+managed_components/
+dependencies.lock
+
+# Telemetry data written by raspberry-pi/receiver.py at runtime (not source)
+data/telemetry/**/*.json
+!data/telemetry/**/.gitkeep
+# Allow committed sample telemetry (one per device, for demo / CI reference)
+!data/telemetry/**/sample.json
+
+# pytest
+.pytest_cache/
+
+# Internal docs kept LOCAL-ONLY (removed from the public repo & history)
+/business/
+/REVIEW.md
+/PLAN_FOR_OPUS.md

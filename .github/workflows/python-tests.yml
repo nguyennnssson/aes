@@ -1,0 +1,42 @@
+name: Python Pipeline Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pipeline-tests:
+    name: Run pipeline test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        # Light deps only — the unit suite is designed to import without the heavy
+        # chromadb stack (no unit test imports rag/*).
+        run: pip install pytest paho-mqtt python-dotenv requests openai
+
+      - name: Run unit tests
+        run: pytest tests/ -q
+
+      - name: Install and start mosquitto broker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+          cat > mosquitto-ci.conf <<'EOF'
+          listener 1883
+          allow_anonymous true
+          EOF
+          mosquitto -c mosquitto-ci.conf -d
+          sleep 2
+
+      - name: Run pipeline tests
+        run: python scripts/test_pipeline.py

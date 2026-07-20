@@ -1,0 +1,30 @@
+menu "AES Firmware Configuration"
+
+    config AES_DEVICE_ID
+        string "Device ID (registry key + MQTT topic suffix)"
+        default "esp32-cam-02"
+        help
+            Must match an entry in config/device_registry.json.
+            Telemetry publishes to aes/telemetry/<AES_DEVICE_ID>.
+
+    config AES_WIFI_SSID
+        string "WiFi SSID"
+        default "AES-Gateway"
+
+    config AES_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+        help
+            Deliberately empty in version control (CWE-798). Set it per build:
+              idf.py menuconfig   (this menu), or
+              put CONFIG_AES_WIFI_PASSWORD="..." in sdkconfig.secrets and build with
+              SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secrets"
+            sdkconfig.secrets is gitignored.
+
+    config AES_MQTT_BROKER_URI
+        string "MQTT broker URI"
+        default "mqtt://192.168.4.1:1883"
+        help
+            Gateway broker. 8883/TLS variant uses the embedded srv_cert.crt.
+
+endmenu

@@ -1,0 +1,37 @@
+{
+  "esp32-cam-01": {
+    "cpu": 20.5294,
+    "memory": 39.2257,
+    "packet_rate": 46.8254,
+    "connections": 2.6454,
+    "sample_count": 5603
+  },
+  "esp32-cam-02": {
+    "cpu": 0.8385,
+    "memory": 34.47,
+    "packet_rate": 0.0,
+    "connections": 0.0,
+    "sample_count": 5691
+  },
+  "esp32-cam-03": {
+    "cpu": 22.3203,
+    "memory": 39.9435,
+    "packet_rate": 51.2921,
+    "connections": 2.7543,
+    "sample_count": 5822
+  },
+  "tapo-c200-01": {
+    "cpu": 15.9458,
+    "memory": 50.7335,
+    "packet_rate": 26.2328,
+    "connections": 2.1866,
+    "sample_count": 5752
+  },
+  "esp32-cam-02-test": {
+    "cpu": 0.676,
+    "memory": 35.391,
+    "packet_rate": 0.0803,
+    "connections": 0.0,
+    "sample_count": 338
+  }
+}
