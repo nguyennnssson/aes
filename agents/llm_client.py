@@ -92,30 +92,45 @@ class OpenAIClient:
 # ─── CODEX CLI BACKEND (ChatGPT subscription auth, no API key) ────────────────
 
 class _CodexMessages:
-    """Duck-types `.messages.create(...)` over the `codex exec` CLI, which runs a
-    single non-interactive turn and prints the result to stdout.
+    """Duck-types `.messages.create(...) -> .content[0].text` over the `codex exec`
+    CLI (one non-interactive turn).
 
-    NOTE: verify the flags against your installed `codex` version — the CLI's
-    surface evolves. `codex exec <prompt>` runs headless; `--model` selects the
-    model. Mirrors the subscription-auth pattern the OpenAI SDK backend replaces
-    with an API key."""
+    Key details verified against codex-cli 0.142.5:
+      * `-o/--output-last-message FILE` writes ONLY the final assistant message to
+        FILE. stdout additionally carries session UI ("codex", "tokens used"), so
+        we read the FILE, not stdout.
+      * `--skip-git-repo-check` + `--sandbox read-only` keep this a pure one-shot
+        reasoning/generation call (no repo mutation, no approval prompts).
+      * The MODEL is left to Codex's own config by default. A ChatGPT-account login
+        only supports the models OpenAI enables for it — forcing e.g. `gpt-5-codex`
+        is rejected with HTTP 400. Set HERMES_CLI_MODEL only to a model your login
+        actually supports; otherwise Codex uses its configured default."""
 
-    def __init__(self, model: str):
-        self.model = model
+    def __init__(self, model_override):
+        self.model_override = model_override    # None → use Codex's configured model
         self._exe = shutil.which("codex")
 
     def create(self, model=None, max_tokens=None, system=None, messages=None,
                timeout=30.0, **_ignored):
         if not self._exe:
-            raise CodexCLIError("codex CLI not found on PATH — install the Codex "
-                                "CLI or set HERMES_BACKEND=openai with a live key")
+            raise CodexCLIError("codex CLI not found on PATH — install the Codex CLI "
+                                "(and run `codex login`) or set HERMES_BACKEND=openai with a key")
 
         # Hermes only ever sends a single user message; fold any system prompt in.
+        # The per-call `model` (from HERMES_MODEL/HERMES_CODE_MODEL, meant for the
+        # API backend) is intentionally IGNORED here — the CLI backend uses Codex's
+        # own configured model unless HERMES_CLI_MODEL overrides it.
         user = "\n\n".join(m["content"] for m in (messages or [])
                            if m.get("role") == "user")
         prompt = f"{system}\n\n{user}" if system else user
 
-        cmd = [self._exe, "exec", "--model", model or self.model, "-"]
+        fd, out_file = tempfile.mkstemp(suffix=".txt", prefix="hermes-codex-")
+        os.close(fd)
+        cmd = [self._exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only",
+               "-o", out_file]
+        if self.model_override:
+            cmd += ["--model", self.model_override]
+        cmd += ["-"]   # read the prompt from stdin
 
         # CLI startup + reasoning is slower than a raw API call; scale the
         # caller's API-sized timeout up but keep it bounded so the monitor
@@ -128,40 +143,69 @@ class _CodexMessages:
                 encoding="utf-8", errors="replace", timeout=cli_timeout,
             )
         except subprocess.TimeoutExpired:
+            try: os.unlink(out_file)
+            except OSError: pass
             raise CodexCLIError(f"codex CLI timed out after {cli_timeout:.0f}s")
         except OSError as e:
+            try: os.unlink(out_file)
+            except OSError: pass
             raise CodexCLIError(f"codex CLI failed to launch: {e}")
+
+        # Prefer the clean last-message file; fall back to stdout if it's empty.
+        text = ""
+        try:
+            with open(out_file, encoding="utf-8", errors="replace") as f:
+                text = f.read().strip()
+        except OSError:
+            pass
+        finally:
+            try: os.unlink(out_file)
+            except OSError: pass
+        if not text:
+            text = (proc.stdout or "").strip()
 
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()[-400:]
             raise CodexCLIError(f"codex CLI exited {proc.returncode}: {detail}")
-
-        text = (proc.stdout or "").strip()
         if not text:
             raise CodexCLIError("codex CLI returned empty output")
         return SimpleNamespace(content=[SimpleNamespace(text=text)])
 
 
 class CodexCLIClient:
-    """`.messages.create()`-shaped wrapper around `codex exec` (subscription auth)."""
+    """`.messages.create()`-shaped wrapper around `codex exec` (ChatGPT subscription
+    auth). The model comes from Codex's own config unless HERMES_CLI_MODEL overrides
+    it (a ChatGPT login rejects models it isn't entitled to, e.g. gpt-5-codex)."""
 
-    def __init__(self, model: str = None):
-        self.model = model or os.getenv("HERMES_CLI_MODEL", "gpt-5-codex")
-        self.messages = _CodexMessages(self.model)
+    def __init__(self):
+        self.model_override = os.getenv("HERMES_CLI_MODEL") or None
+        self.model = self.model_override or "(codex config default)"
+        self.messages = _CodexMessages(self.model_override)
 
     def __repr__(self):
         return f"CodexCLIClient(model={self.model!r})"
 
 
 def make_hermes_client():
-    """Build the Hermes reasoning client per HERMES_BACKEND (see module docstring)."""
-    backend = os.getenv("HERMES_BACKEND", "").strip().lower()
+    """Build the Hermes reasoning client per HERMES_BACKEND (see module docstring).
+
+    Robust to legacy/unknown values: 'cli' (old Claude-era value) maps to codex,
+    'api' to openai; anything empty or unrecognized auto-selects (openai if a key
+    is present, else codex). If openai is requested without a key, we fall back to
+    codex rather than crash — so a stale .env can never wedge the pipeline."""
+    raw = os.getenv("HERMES_BACKEND", "").strip().lower()
+    backend = {"cli": "codex", "codex": "codex", "api": "openai", "openai": "openai"}.get(raw, "")
     if not backend:
         backend = "openai" if os.getenv("OPENAI_API_KEY") else "codex"
 
+    if backend == "openai" and not os.getenv("OPENAI_API_KEY"):
+        print("[HERMES] HERMES_BACKEND=openai but OPENAI_API_KEY is unset — "
+              "falling back to the codex CLI backend")
+        backend = "codex"
+
     if backend == "codex":
         client = CodexCLIClient()
-        print(f"[HERMES] Backend: codex CLI (subscription auth) — model '{client.model}'")
+        print(f"[HERMES] Backend: codex CLI (ChatGPT subscription auth) — model {client.model}")
         return client
 
     client = OpenAIClient()

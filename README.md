@@ -58,11 +58,13 @@ The reasoning backend is swappable (`agents/llm_client.py`), and AES uses **two 
 | Self-tuning detection params | `skills/hitl.py` | **GPT-5** | Proposes safer EWMA thresholds from real incident/normal corpora. |
 | **Firmware patch generation** | `Hermes.generate_patch` | **Codex** (`gpt-5-codex`, `HERMES_CODE_MODEL`) | Writes the minimal unified-diff C fix and iterates against Gate 1 (Semgrep) + Gate 2 (compile/boot) feedback — coding against verifiers, Codex's sweet spot. |
 
-**Two backends** (set `HERMES_BACKEND`):
-- `openai` — the OpenAI SDK with an `OPENAI_API_KEY`. **Default when a key is present.**
-- `codex` — the local `codex` CLI (ChatGPT subscription auth, no API key). Default when no key is set.
+The model column above applies to the **`openai` (API‑key) backend**. On the **`codex` CLI backend**, both reasoning and patch generation run through whatever model your Codex login is configured for (see backends below).
 
-Point `HERMES_MODEL` at a newer reasoning model (e.g. `gpt-6`) with no code change. If the OpenAI backend is unreachable, Hermes degrades to a local Llama 3 (Ollama) fallback rather than crashing the monitor.
+**Two backends** (set `HERMES_BACKEND`):
+- `openai` — the OpenAI SDK with an `OPENAI_API_KEY`. Uses `HERMES_MODEL` (default `gpt-5`) for reasoning and `HERMES_CODE_MODEL` (default `gpt-5-codex`) for patches. **Default when a key is present.** Point `HERMES_MODEL` at a newer model (e.g. `gpt-6`) with no code change.
+- `codex` — the local `codex` CLI with **ChatGPT subscription auth, no API key**. Default when no key is set. It uses **Codex's own configured model** — `HERMES_MODEL`/`HERMES_CODE_MODEL` do **not** apply here. Leave `HERMES_CLI_MODEL` unset (a ChatGPT‑account login rejects models it isn't entitled to, e.g. `gpt-5-codex`); set it only to a model your login supports.
+
+If the reasoning backend is unreachable (network, auth, rate‑limit, or a missing `codex`/key), Hermes degrades to a local Llama 3 (Ollama) fallback rather than crashing the monitor.
 
 ---
 
@@ -171,9 +173,11 @@ export OPENAI_API_KEY="<your-key>"          # your key — never commit it
 
 ```bash
 export HERMES_BACKEND="codex"               # uses your ChatGPT subscription auth
+# Leave HERMES_CLI_MODEL unset → Codex uses its own configured model.
+# (A ChatGPT-account login rejects models it isn't entitled to, e.g. gpt-5-codex.)
 ```
 
-Model selection (optional — sensible defaults shown):
+Model selection for **Option A (the API backend) only** — the Codex CLI ignores these and uses its own configured model:
 
 ```bash
 export HERMES_MODEL="gpt-5"                 # reasoning model (point at gpt-6 when available)

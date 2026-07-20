@@ -47,7 +47,9 @@ def _is_backend_unreachable(exc: Exception) -> bool:
         return True
     try:
         import openai
-        return isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError))
+        # Any OpenAI SDK error (connection, timeout, auth, rate-limit, bad status)
+        # degrades to the offline fallback rather than crashing the monitor thread.
+        return isinstance(exc, openai.OpenAIError)
     except ImportError:
         return False
 

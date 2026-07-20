@@ -24,6 +24,10 @@ import time
 import types
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Run-from-scripts/ safety: put the repo root on sys.path so `import agents...`
+# resolves whether invoked as `python scripts/test_pipeline.py` or `-m`.
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 DATA_DIR = os.path.join(REPO_ROOT, "data", "telemetry")
 DEVICE_ID = "esp32-cam-02"
 DEVICE_DIR = os.path.join(DATA_DIR, DEVICE_ID)
@@ -64,7 +68,17 @@ def test_broker_connect():
         from agents.mqtt_compat import make_mqtt_client
         c = make_mqtt_client("aes-test-probe")   # works on paho 1.x AND 2.x
         c.on_connect = on_connect
-        c.connect(BROKER_HOST, BROKER_PORT, keepalive=5)
+        try:
+            c.connect(BROKER_HOST, BROKER_PORT, keepalive=5)
+        except OSError as e:
+            # Broker simply not running — that's an environment condition, not a
+            # pipeline defect. SKIP (so the live MQTT round-trip also skips) rather
+            # than fail the suite.
+            msg = (f"  {SKIP} broker not running on localhost:1883 "
+                   f"({type(e).__name__}) — start mosquitto to test live MQTT")
+            results.append((None, msg))
+            print(msg)
+            return False
         c.loop_start()
         ok = connected.wait(timeout=5)
         c.loop_stop()
