@@ -1,10 +1,11 @@
 """
 AES — RAG Ingestion Pipeline
-Fetches IoT/camera security data from 4 sources and stores in ChromaDB.
+Fetches IoT/camera security data from 4 sources and stores in the local AES
+SQLite vector index.
 
 Sources (per AES Overview):
   1. NVD      — Full CVE corpus with CVSS scores and CWE mapping
-  2. Exploit-DB — PoC exploit code for published CVEs (used in Gate 2)
+  2. Exploit-DB — catalogue metadata only (no exploit code is downloaded/executed)
   3. ICS-CERT — CISA advisories for IoT/OT-specific vulnerabilities
   4. Espressif — ESP32-specific security advisories from silicon vendor
 
@@ -19,14 +20,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-import chromadb
-from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
+from rag.vector_store import get_collection
 
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 DAYS_BACK  = 365
-CHROMA_PATH = "./aes_chromadb"
 
 # NVD keywords targeting our device surface
 NVD_SEARCH_TERMS = [
@@ -43,25 +42,15 @@ EXPLOITDB_CSV  = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files
 ICSCERT_URL    = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
 
-# ─── CHROMADB SETUP ──────────────────────────────────────────────────────────
+# ─── LOCAL VECTOR INDEX ──────────────────────────────────────────────────────
 
-nomic_ef = OllamaEmbeddingFunction(
-    model_name="nomic-embed-text",
-    url="http://localhost:11434/api/embeddings",
-)
-
-client     = chromadb.PersistentClient(path=CHROMA_PATH)
-collection = client.get_or_create_collection(
-    name="cve_knowledge_base",
-    embedding_function=nomic_ef,
-    metadata={"hnsw:space": "cosine"},
-)
+collection = get_collection()
 
 
 # ─── SHARED STORAGE ──────────────────────────────────────────────────────────
 
 def store_document(doc_id: str, document_text: str, metadata: dict) -> bool:
-    """Store a document in ChromaDB. Returns True if new, False if duplicate."""
+    """Store a document in the local index. Returns True if new."""
     if collection.get(ids=[doc_id])["ids"]:
         return False
     collection.add(ids=[doc_id], documents=[document_text], metadatas=[metadata])
@@ -340,7 +329,7 @@ def main():
     print()
     print("=" * 60)
     print("Done.")
-    print(f"  Stored  : {total_stored}  ← new entries added to ChromaDB")
+    print(f"  Stored  : {total_stored}  ← new entries added to the local vector index")
     print(f"  Skipped : {total_skipped}  ← duplicates, filtered, or no description")
     print(f"  DB total: {collection.count()} documents")
     print("=" * 60)

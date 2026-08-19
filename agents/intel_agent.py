@@ -15,6 +15,8 @@ Usage:
 """
 
 from dataclasses import dataclass, field
+import math
+import os
 from rag.vector_store import get_collection
 
 
@@ -32,7 +34,7 @@ class IntelAgent:
         device_model:     str,
         firmware_version: str,
         attack_signature: str,
-        top_k:            int = 10,
+        top_k:            int = 5,
     ) -> IntelContext:
         """
         Query the CVE knowledge base.
@@ -46,9 +48,9 @@ class IntelAgent:
         Returns:
             IntelContext with formatted string ready to inject into Hermes prompt.
         """
-        q = f"{device_model} {firmware_version} {attack_signature}"
+        q = f"{device_model} {firmware_version} {attack_signature}"[:2000]
 
-        # ChromaDB init + query both depend on a live Ollama embedding server.
+        # The embedded vector index query depends on a live Ollama embedder.
         # If either is unreachable, degrade gracefully — Hermes can still reason
         # from the anomaly alone. NEVER raise into the incident pipeline (H2):
         # an exception here would otherwise crash on_message and strand the device.
@@ -61,7 +63,7 @@ class IntelAgent:
 
             results = collection.query(
                 query_texts=[q],
-                n_results=min(top_k, count),
+                n_results=min(max(1, top_k * 3), count),
                 include=["documents", "metadatas", "distances"],
                 # NOTE: confidence filter requires re-ingestion with confidence metadata field.
                 # Current data (NVD/Exploit-DB/ICS-CERT) does not include this field yet.
@@ -75,6 +77,14 @@ class IntelAgent:
                           f"Proceed on anomaly signature alone.",
             )
 
+        try:
+            min_relevance = float(os.getenv("INTEL_MIN_RELEVANCE", "0.65"))
+        except ValueError:
+            min_relevance = 0.65
+        if not math.isfinite(min_relevance):
+            min_relevance = 0.65
+        min_relevance = max(0.0, min(1.0, min_relevance))
+        allowed_sources = {"NVD", "Exploit-DB", "ICS-CERT", "Espressif"}
         chunks = []
         if results["ids"][0]:
             for doc, meta, dist in zip(
@@ -82,7 +92,12 @@ class IntelAgent:
                 results["metadatas"][0],
                 results["distances"][0],
             ):
-                chunks.append({"doc": doc, "meta": meta, "dist": dist})
+                relevance = 1.0 - float(dist)
+                if (math.isfinite(relevance) and relevance >= min_relevance
+                        and meta.get("source") in allowed_sources):
+                    chunks.append({"doc": str(doc)[:4000], "meta": meta, "dist": float(dist)})
+                if len(chunks) >= top_k:
+                    break
 
         return IntelContext(
             query=q,
@@ -111,7 +126,7 @@ def format_context(query: str, chunks: list[dict]) -> str:
 
     for i, c in enumerate(chunks):
         meta      = c["meta"]
-        relevance = round((1 - c["dist"] / 2) * 100, 1)
+        relevance = round((1 - c["dist"]) * 100, 1)
         header    = (
             f"\n[{i+1}] [Source: {meta.get('source', '?')} | "
             f"CVE: {meta.get('cve_id', '?')} | "

@@ -34,8 +34,13 @@ Out of scope:
 
 ## Handling notes for operators
 
-- Physical actions (firmware flash, firewall enforcement) are opt-in behind
-  environment flags and default to non-destructive dry-run / hold-for-approval.
-- The dashboard controls live detection and must never be exposed to the public
-  internet — bind it to localhost or a trusted LAN only.
+- Firmware installation requires strict gate evidence, a signed binary, secure-
+  boot/flash-encryption attestation, and an HMAC approval bound to the artifact
+  hashes. Firewall dry runs never resolve an incident.
+- MQTT uses TLS, per-device credentials, registry enrollment, and broker topic
+  ACLs. `AES_INSECURE_DEV_MQTT=1` is for isolated loopback tests only.
+- Every dashboard API requires `AES_DASHBOARD_TOKEN`. Keep it on localhost; use a
+  TLS reverse proxy plus explicit host/origin allowlists for any trusted-LAN use.
+- Production requires HMAC keys for the incident audit chain, firmware approvals,
+  skill approvals, and benchmark labels.
 - Never commit `.env`, API keys, webhooks, or device credentials.

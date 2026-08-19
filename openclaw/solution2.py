@@ -5,9 +5,8 @@ Owner: Duc Vu (Software/Pipeline)
 
 Execution layer for closed-firmware devices (Tapo C200): the device can't be
 patched, so it gets wrapped at the gateway. The rule is derived from the
-3-source whitelist model (manufacturer spec + fresh-flash baseline + CVE
-exclusion); enforcement is a bidirectional block of the device's IP in a
-dedicated, reversible quarantine rule/chain/table.
+enforcement is a bidirectional block of the device's registry-pinned identity in
+a dedicated, reversible quarantine rule/chain/table.
 
 FLOW (handle() — the interface contract with response_agent.respond()):
   1. Resolve the device IP    — device_registry.json "ip" key, or the
@@ -17,7 +16,7 @@ FLOW (handle() — the interface contract with response_agent.respond()):
   4. DRY-RUN — ALWAYS FIRST   — never skipped, red line.
   5. Enforce + verify         — ONLY when AES_FIREWALL_ENFORCE=1.
                                 Default is dry-run-only: the plan is logged and
-                                the incident is marked "enforced_dryrun", so a
+                                the incident remains pending approval, so a
                                 dev bench can never knock a real camera offline
                                 by accident. Set the env var on the gateway.
   6. Audit trail              — every action (incl. dry-runs and failures)
@@ -29,6 +28,7 @@ Rollback: python -m openclaw.solution2 release <device_id>
 import json
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,30 +36,36 @@ from openclaw.firewall import QuarantinePlan, detect_backend
 
 _REPO_ROOT  = Path(__file__).resolve().parents[1]
 _AUDIT_PATH = _REPO_ROOT / "outputs" / "firewall" / "actions.jsonl"
+_AUDIT_LOCK = threading.Lock()
 
 
 def _audit(record: dict):
     """Append-only audit trail of every firewall decision, enforced or not."""
     _AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     record["at"] = datetime.now(timezone.utc).isoformat()
-    with open(_AUDIT_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+    with _AUDIT_LOCK, open(_AUDIT_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, allow_nan=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
-def _resolve_ip(device_id: str) -> str | None:
+def _resolve_identity(device_id: str) -> tuple[str | None, str | None]:
     """Registry "ip" key first, then AES_DEVICE_IP_<DEVICE_ID> env override."""
     from agents.monitor_agent import DEVICE_REGISTRY
-    ip = (DEVICE_REGISTRY.get(device_id) or {}).get("ip")
+    record = DEVICE_REGISTRY.get(device_id) or {}
+    ip = record.get("ip")
+    mac = record.get("mac")
     if ip:
-        return ip
-    return os.getenv(f"AES_DEVICE_IP_{device_id.upper().replace('-', '_')}")
+        return ip, mac
+    suffix = device_id.upper().replace('-', '_')
+    return os.getenv(f"AES_DEVICE_IP_{suffix}"), os.getenv(f"AES_DEVICE_MAC_{suffix}")
 
 
-def handle(incident: dict, verdict: dict) -> bool:
+def handle(incident: dict, verdict: dict) -> str:
     """
     Solution 2 entry point — called by response_agent.handle_solution_2().
-    Returns True on success (rule enforced+verified, or dry-run-only mode),
-    False on any failure (triggers response_agent's retry/backoff).
+    Returns "resolved" only after live enforcement verifies, "pending" after a
+    successful dry run, and "failed" otherwise.
     """
     from agents.response_agent import update_incident_fields   # lazy: avoids circular import
 
@@ -71,26 +77,25 @@ def handle(incident: dict, verdict: dict) -> bool:
     update_incident_fields(incident_id, stage="vuln_confirmed")
 
     # ── Step 1-2: resolve + validate the plan ────────────────────────────────
-    ip = _resolve_ip(device_id)
+    ip, expected_mac = _resolve_identity(device_id)
     if not ip:
         print(f"    [ERROR] No IP known for {device_id} — add \"ip\" to "
               f"config/device_registry.json or set AES_DEVICE_IP_"
               f"{device_id.upper().replace('-', '_')}")
         _audit({"device_id": device_id, "incident_id": incident_id,
                 "action": "quarantine", "result": "failed", "reason": "no IP"})
-        return False
+        return "failed"
 
-    plan = QuarantinePlan(device_id=device_id, ip=ip)
+    plan = QuarantinePlan(device_id=device_id, ip=ip, expected_mac=expected_mac)
     err = plan.validate()
     if err:
         print(f"    [ERROR] Unsafe plan rejected: {err}")
         _audit({"device_id": device_id, "incident_id": incident_id,
                 "action": "quarantine", "result": "rejected", "reason": err})
-        return False
+        return "failed"
     print(f"    Step 1: Plan — block {ip} bidirectionally as '{plan.rule_name}'")
-    print(f"            (3-source whitelist: manufacturer spec + fresh-flash "
-          f"baseline + CVE exclusion → everything else drops)")
-    update_incident_fields(incident_id, stage="whitelist_built")
+    print("            (full quarantine: bidirectional DROP at the forwarding gateway)")
+    update_incident_fields(incident_id, stage="identity_verified")
 
     # ── Step 3: pick the enforcement point ───────────────────────────────────
     backend = detect_backend(ssh_target=os.getenv("GATEWAY_SSH"))
@@ -100,8 +105,22 @@ def handle(incident: dict, verdict: dict) -> bool:
         _audit({"device_id": device_id, "incident_id": incident_id,
                 "action": "quarantine", "result": "failed",
                 "reason": f"backend unavailable: {detail}"})
-        return False
+        return "failed"
     print(f"    Step 2: Enforcement point — {backend.name} ({detail})")
+
+    if not hasattr(backend, "verify_identity"):
+        print("    [ERROR] Firewall backend cannot verify the device's pinned IP/MAC identity")
+        _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
+                "backend": backend.name, "action": "identity_check",
+                "result": "failed", "reason": "backend cannot verify pinned identity"})
+        return "failed"
+    ok, detail = backend.verify_identity(plan)
+    if not ok:
+        print(f"    [ERROR] Device identity check failed: {detail}")
+        _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
+                "backend": backend.name, "action": "identity_check",
+                "result": "failed", "reason": detail})
+        return "failed"
 
     # ── Step 4: DRY-RUN — never skipped (red line) ───────────────────────────
     ok, detail = backend.dry_run(plan)
@@ -111,19 +130,19 @@ def handle(incident: dict, verdict: dict) -> bool:
         _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
                 "backend": backend.name, "action": "dry_run", "result": "failed",
                 "reason": detail})
-        return False
+        return "failed"
 
     if not enforce:
         # Safe default for dev benches: prove the whole path except the write.
         print(f"    Step 4: ENFORCEMENT SKIPPED — AES_FIREWALL_ENFORCE is not set.")
         print(f"            Dry-run passed; set AES_FIREWALL_ENFORCE=1 on the "
               f"gateway to write real rules.")
-        update_incident_fields(incident_id, stage="enforced_dryrun",
+        update_incident_fields(incident_id, stage="awaiting_firewall_enforcement",
                                enforcement="dry_run_only")
         _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
                 "backend": backend.name, "action": "quarantine",
                 "result": "dry_run_only"})
-        return True
+        return "pending"
 
     # ── Step 5: enforce + verify ─────────────────────────────────────────────
     ok, detail = backend.apply(plan)
@@ -133,7 +152,7 @@ def handle(incident: dict, verdict: dict) -> bool:
         _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
                 "backend": backend.name, "action": "quarantine",
                 "result": "failed", "reason": detail})
-        return False
+        return "failed"
 
     ok, detail = backend.verify(plan)
     print(f"    Step 5: Verify — {'OK' if ok else 'FAILED'}: {detail}")
@@ -144,22 +163,22 @@ def handle(incident: dict, verdict: dict) -> bool:
         _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
                 "backend": backend.name, "action": "quarantine",
                 "result": "verify_failed_rolled_back"})
-        return False
+        return "failed"
 
     update_incident_fields(incident_id, stage="verified", enforcement="live")
     _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,
             "backend": backend.name, "action": "quarantine", "result": "enforced"})
     print(f"    ✅ {device_id} quarantined at the gateway — traffic drops verified")
-    return True
+    return "resolved"
 
 
 def release(device_id: str) -> bool:
     """Lift a quarantine (CLI: python -m openclaw.solution2 release <device_id>)."""
-    ip = _resolve_ip(device_id)
+    ip, expected_mac = _resolve_identity(device_id)
     if not ip:
         print(f"[SOLUTION 2] No IP known for {device_id}")
         return False
-    plan = QuarantinePlan(device_id=device_id, ip=ip)
+    plan = QuarantinePlan(device_id=device_id, ip=ip, expected_mac=expected_mac)
     if plan.validate():
         print(f"[SOLUTION 2] Unsafe plan: {plan.validate()}")
         return False

@@ -1,0 +1,14 @@
+# Production-only ESP32 security profile. Build with:
+#   SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.production.defaults;sdkconfig.secrets" idf.py build
+# Signing/encryption keys live outside the repository; provisioning is an
+# irreversible eFuse operation and must follow Espressif's production checklist.
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOTLOADER_MODE_RELEASE=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

@@ -56,8 +56,9 @@ attack is noticeable from anywhere. Charts: green = normal/baseline, red = under
   packet_rate / connections), **IncidentTheater** (Device→Monitor→Intel→Hermes→Response→OpenClaw→
   Discord·optional + deviation bars + Hermes verdict), and a **RemediationTheater** — a **live
   stepping process** (animated stepper + streaming log + filling OTA progress) that adapts:
-  Solution 1 → OTA diff + Semgrep gates + dual-partition flash; Solution 2 → 3-source firewall
-  whitelist. Camera panels are light (daylight scene) to fit the white theme. Empty state if the
+  Solution 1 → signed firmware diff + strict static/hardware gates + approval-bound serial install;
+  Solution 2 → gateway identity verification and bidirectional quarantine. Camera panels are light
+  (daylight scene) to fit the white theme. Empty state if the
   device isn't connected.
 - **`/learning`** (`app/learning/page.tsx`) — Hermes self-improvement: pending **SkillCard**(s) with
   detection/false-positive gauges + Approve/Reject (wired to `/api/approve|reject`), detection-rate

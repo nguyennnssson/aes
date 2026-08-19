@@ -31,6 +31,7 @@ from dataclasses import dataclass
 class QuarantinePlan:
     device_id: str
     ip:        str
+    expected_mac: str | None = None
 
     @property
     def rule_name(self) -> str:
@@ -41,9 +42,13 @@ class QuarantinePlan:
         if not re.fullmatch(r"[a-z0-9-]{1,64}", self.device_id):
             return f"unsafe device_id {self.device_id!r} — [a-z0-9-] only"
         try:
-            ipaddress.ip_address(self.ip)
+            parsed_ip = ipaddress.ip_address(self.ip)
         except ValueError:
             return f"invalid IP address {self.ip!r}"
+        if not isinstance(parsed_ip, ipaddress.IPv4Address):
+            return "iptables quarantine currently requires an IPv4 address"
+        if not self.expected_mac or not re.fullmatch(r"(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}", self.expected_mac):
+            return "a registry-pinned device MAC address is required"
         return None
 
 
@@ -71,7 +76,7 @@ class IptablesBackend:
     name = "iptables"
 
     def __init__(self, ssh_target: str | None = None):
-        if ssh_target and not re.fullmatch(r"[A-Za-z0-9_.@-]+", ssh_target):
+        if ssh_target and (ssh_target.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_.@-]+", ssh_target)):
             raise ValueError(f"unsafe SSH target {ssh_target!r}")
         self.ssh_target = ssh_target
 
@@ -81,6 +86,12 @@ class IptablesBackend:
             return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                     self.ssh_target, "sudo", *base]
         return base
+
+    def _host_argv(self, *args: str) -> list:
+        if self.ssh_target:
+            return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                    self.ssh_target, *args]
+        return list(args)
 
     def available(self) -> tuple[bool, str]:
         if self.ssh_target:
@@ -104,6 +115,14 @@ class IptablesBackend:
         return True, ("rule already present (idempotent)" if already
                       else f"would DROP src/dst {plan.ip} in AES_QUARANTINE")
 
+    def verify_identity(self, plan: QuarantinePlan) -> tuple[bool, str]:
+        ok, out = _run(self._host_argv("ip", "neigh", "show", plan.ip))
+        expected = (plan.expected_mac or "").lower()
+        observed = re.search(r"(?i)\blladdr\s+(([0-9a-f]{2}:){5}[0-9a-f]{2})\b", out)
+        matched = ok and observed is not None and observed.group(1).lower() == expected and "failed" not in out.lower()
+        return matched, ("IP/MAC lease identity verified" if matched
+                         else f"neighbor identity mismatch for {plan.ip}; expected {expected}")
+
     def apply(self, plan: QuarantinePlan) -> tuple[bool, str]:
         ok, out = self._ensure_chain()
         if not ok:
@@ -116,8 +135,10 @@ class IptablesBackend:
         return True, f"DROP rules live for {plan.ip} (both directions)"
 
     def verify(self, plan: QuarantinePlan) -> tuple[bool, str]:
-        ok = _run(self._argv("-C", "AES_QUARANTINE", "-s", plan.ip, "-j", "DROP"))[0]
-        return ok, "rule verified in chain" if ok else "rule NOT present after apply"
+        source = _run(self._argv("-C", "AES_QUARANTINE", "-s", plan.ip, "-j", "DROP"))[0]
+        destination = _run(self._argv("-C", "AES_QUARANTINE", "-d", plan.ip, "-j", "DROP"))[0]
+        ok = source and destination
+        return ok, "bidirectional rules verified in chain" if ok else "one or more DROP rules missing"
 
     def remove(self, plan: QuarantinePlan) -> tuple[bool, str]:
         results = [_run(self._argv("-D", "AES_QUARANTINE", *d, "-j", "DROP"))
@@ -201,6 +222,16 @@ class NetshBackend:
                      f"name={plan.rule_name}"])
 
 
+class UnavailableBackend:
+    name = "unavailable"
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def available(self) -> tuple[bool, str]:
+        return False, self.reason
+
+
 # ─── SELECTION ───────────────────────────────────────────────────────────────
 
 def detect_backend(ssh_target: str | None = None):
@@ -210,6 +241,12 @@ def detect_backend(ssh_target: str | None = None):
     """
     if ssh_target:
         return IptablesBackend(ssh_target=ssh_target)
+    # Host firewalls do not quarantine a camera unless this process is actually
+    # running on the forwarding gateway. Require an explicit operator assertion
+    # instead of silently applying an ineffective local Windows/macOS rule.
+    import os
+    if os.getenv("AES_LOCAL_IS_GATEWAY") != "1":
+        return UnavailableBackend("set GATEWAY_SSH, or set AES_LOCAL_IS_GATEWAY=1 on the forwarding gateway")
     if sys.platform.startswith("linux"):
         return IptablesBackend()
     if sys.platform == "darwin":

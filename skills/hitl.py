@@ -138,7 +138,17 @@ class HITLOrchestrator:
             print(f"[HITL] Skill {skill_id} is {skill.status}, not PENDING_HITL")
             return False
 
-        skill.approve(approved_by)
+        # Re-run against the current independently signed corpora immediately
+        # before approval. A stale or locally edited benchmark record can never
+        # be converted into an approval signature.
+        if not self.sandbox.benchmark(skill).passed():
+            print(f"[HITL] Approval refused: current authenticated benchmark failed")
+            return False
+        try:
+            skill.approve(approved_by)
+        except ValueError as exc:
+            print(f"[HITL] Approval refused: {exc}")
+            return False
         self.store.save(skill)
 
         print(f"[HITL] ✅ Approved by {approved_by} — injecting...")

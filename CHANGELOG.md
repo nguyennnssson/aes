@@ -2,15 +2,14 @@
 
 Engineering history for AES — Autonomous Edge-Sentinel. Newest first.
 
-## Reasoning backend → OpenAI (Codex + GPT-5)
+## Reasoning backend → OpenAI Responses API
 
-- Hermes now runs on **OpenAI**. Reasoning calls (incident verdicts, packet
-  classification, self-tuning detection params) use **GPT-5** (`HERMES_MODEL`);
-  firmware patch generation uses **Codex** (`gpt-5-codex`, `HERMES_CODE_MODEL`) —
-  a coding model iterating against the Gate 1/Gate 2 verifiers.
+- Hermes' OpenAI backend uses the Responses API. Reasoning calls and firmware
+  patch generation default to `gpt-5.6-sol`, with independent environment
+  settings so each role can be evaluated and changed separately.
 - Two swappable backends (`agents/llm_client.py`): `openai` (OpenAI SDK +
   `OPENAI_API_KEY`) and `codex` (the `codex` CLI, ChatGPT subscription auth).
-  Point `HERMES_MODEL` at a newer model (e.g. `gpt-6`) with no code change.
+  Model settings can be changed without code changes.
 - Offline fallback to a local Llama 3 (Ollama) if the OpenAI backend is
   unreachable — the monitor never crashes on a backend outage.
 

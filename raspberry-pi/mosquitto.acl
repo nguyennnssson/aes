@@ -1,0 +1,9 @@
+# Per-device usernames must equal device IDs. The pattern prevents one enrolled
+# device from publishing telemetry under another device's identity.
+pattern write aes/telemetry/%u
+
+user aes-monitor
+topic read aes/telemetry/+
+
+user aes-receiver
+topic read aes/telemetry/+

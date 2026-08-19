@@ -1,380 +1,275 @@
 # AES — Autonomous Edge-Sentinel
 
-> *A self-healing, self-improving IoT security system, powered by OpenAI Codex + GPT-5.*
+AES is a fail-closed IoT incident-response prototype for ESP32 cameras and
+gateway-managed closed-firmware cameras. It detects coordinated telemetry
+anomalies, retrieves relevant public vulnerability intelligence, asks an LLM for
+a structured verdict, and prepares a remediation for explicit operator approval.
 
-![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
-![Powered by OpenAI](https://img.shields.io/badge/AI-Codex%20%2B%20GPT--5-black.svg)
+AES does **not** claim that an AI verdict is proof of compromise. A physical
+action is considered complete only after its independent enforcement evidence
+passes. Missing hardware, skipped tests, dry runs, low-confidence intelligence,
+and pending approvals all keep an incident open.
 
----
+## Response tracks
 
-## What It Does
+- **Track 1 — firmware remediation:** ESP32-CAM source controlled by the
+  operator. Completion requires a static scan, clean compile, authenticated
+  reference boot, active attack-harness replay, signed artifact verification,
+  hash-bound human approval, hardware security attestation, physical install,
+  and authenticated fresh-boot proof.
+- **Track 2 — gateway quarantine:** closed-firmware cameras. Completion requires
+  registry-pinned IP/MAC identity, gateway dry run, explicit enforcement, and
+  verified bidirectional DROP rules.
+- **Track 3 — detector tuning:** all enrolled devices. Completion requires an
+  independently labelled HMAC-authenticated benchmark corpus, bounded
+  parameters, a benchmark pass, hash-bound human approval, and atomic injection.
 
-IoT devices are attacked constantly. When one gets compromised, a security engineer has to manually investigate, diagnose, write a fix, and push an update — 4 to 8 hours per device. AES does this automatically in seconds, and **measurably gets better at detecting attacks after every incident**.
+Track 1 currently performs a **signed serial firmware installation**. It is not
+an over-the-air transport. The partition table and on-device rollback lifecycle
+support a future genuine OTA transport, but AES does not call `esptool` “OTA.”
 
-**Three solutions, one pipeline:**
+## Trust boundaries
 
-| Solution | Target | Approach |
-|---|---|---|
-| 1 — OTA Patch | ESP32-CAM (open firmware) | Patches the vulnerability inside the device via esptool.py OTA |
-| 2 — Network Whitelist | Tapo C200 (closed firmware) | Wraps the device in a 3-source iptables whitelist at the gateway |
-| 3 — Self-Rewriting Detection | All devices | Hermes tunes its own EWMA detection parameters after every resolved incident — sandboxed, human-approved, hot-loaded live |
-
----
-
-## Architecture
-
-```
-[Device Fleet]  ESP32-CAM / Tapo C200
-                │  MQTT telemetry every 5s
-                ▼
-[Raspberry Pi]  Mosquitto broker (port 1883 → 8883 TLS in production)
-                │  EWMA anomaly detection
-                ▼
-[Mac Studio]    Monitor Agent → Intel Agent (ChromaDB RAG) → Hermes → Response Agent
-                                                                    │
-                                              ┌─────────────────────┴───────────────┐
-                                              ▼                                       ▼
-                                   Discord #aes-alerts                  Solution 3 learning loop
-                                                                  (propose → sandbox → approve → inject)
-```
-
-**Two AI agents:**
-- **Hermes** — reasoning layer. CVE analysis, incident verdicts, firmware patch generation, and self-tuning detection parameters. Runs on OpenAI (see below).
-- **OpenClaw** — execution layer. OTA flash, firewall writes, Discord alerts, skill injection.
-
-**Telemetry contract (firmware ↔ monitor):** devices publish **raw** metrics to `aes/telemetry/{device_id}` as `{device_id, cpu_percent, memory_percent, packet_rate, connection_count}` (+ optional `timestamp`). The Monitor Agent owns the EWMA baseline and deviation math — the device only reports raw readings.
-
----
-
-## Powered by OpenAI — Codex + GPT-5
-
-The reasoning backend is swappable (`agents/llm_client.py`), and AES uses **two OpenAI models for two different jobs** — reasoning vs. writing code:
-
-| Job | Where | Model | Why this model |
-|---|---|---|---|
-| Incident triage → verdict (action, CVE, confidence) | `Hermes.analyze_incident` | **GPT-5** (`HERMES_MODEL`) | Judgment over noisy telemetry + untrusted CVE context; structured JSON out. |
-| Packet-window classification | `Hermes.classify_packet_window` | **GPT-5** | Fast reasoning call. |
-| Self-tuning detection params | `skills/hitl.py` | **GPT-5** | Proposes safer EWMA thresholds from real incident/normal corpora. |
-| **Firmware patch generation** | `Hermes.generate_patch` | **Codex** (`gpt-5-codex`, `HERMES_CODE_MODEL`) | Writes the minimal unified-diff C fix and iterates against Gate 1 (Semgrep) + Gate 2 (compile/boot) feedback — coding against verifiers, Codex's sweet spot. |
-
-The model column above applies to the **`openai` (API‑key) backend**. On the **`codex` CLI backend**, both reasoning and patch generation run through whatever model your Codex login is configured for (see backends below).
-
-**Two backends** (set `HERMES_BACKEND`):
-- `openai` — the OpenAI SDK with an `OPENAI_API_KEY`. Uses `HERMES_MODEL` (default `gpt-5`) for reasoning and `HERMES_CODE_MODEL` (default `gpt-5-codex`) for patches. **Default when a key is present.** Point `HERMES_MODEL` at a newer model (e.g. `gpt-6`) with no code change.
-- `codex` — the local `codex` CLI with **ChatGPT subscription auth, no API key**. Default when no key is set. It uses **Codex's own configured model** — `HERMES_MODEL`/`HERMES_CODE_MODEL` do **not** apply here. Leave `HERMES_CLI_MODEL` unset (a ChatGPT‑account login rejects models it isn't entitled to, e.g. `gpt-5-codex`); set it only to a model your login supports.
-
-If the reasoning backend is unreachable (network, auth, rate‑limit, or a missing `codex`/key), Hermes degrades to a local Llama 3 (Ollama) fallback rather than crashing the monitor.
-
----
-
-## Solution 3 — the self-improvement loop (how it actually works)
-
-A "skill" is a small set of EWMA detection **parameters** (e.g. `{"deviation_threshold": 0.4, "simultaneous_threshold": 2}`) — **not** executable code. There is no `exec()` anywhere in the loop.
-
-1. A confirmed incident auto-triggers `HITLOrchestrator.propose_skill()` (cooldown-gated, one Hermes call per incident).
-2. Hermes proposes tuned params; they're **validated and clamped** to safe bounds.
-3. The **sandbox** replays real logged attacks (`aes_incidents.jsonl`) **and** real normal readings (`aes_normals.jsonl`) through the proposed params, measuring detection rate **and** false-positive rate. A skill **cannot** pass without a real normal corpus to prove against.
-4. If it passes, the proposal + benchmark are posted to `#aes-alerts` for human ✅.
-5. On approval, the injector **atomically** writes the params to `config/active_detection.json`. The running Monitor Agent polls that file by mtime and adopts the new params on its **next reading** — no restart, no `importlib.reload`, no cross-process surgery.
-
-This makes the self-improvement a real, visible before/after: the same attack the old params miss gets caught after the loop deploys the new ones.
-
----
-
-## Repository Structure
-
-```
-aes/
-├── agents/
-│   ├── monitor_agent.py         # EWMA detection (pure) + live param loading + tamper-evident log
-│   ├── monitor_agent_mqtt.py    # MQTT subscriber — cooldown, try/finally, auto learning-loop trigger
-│   ├── intel_agent.py           # Intel Agent — ChromaDB CVE search (degrades gracefully if Ollama down)
-│   ├── hermes.py                # Hermes reasoning wrapper (analyze / patch / tune), timeouts on all calls
-│   ├── fallback.py              # Offline fallback — Llama 3 8B via Ollama
-│   └── response_agent.py        # Routes verdicts to Solution 1/2/3; holds INVESTIGATE/low-confidence
-│   └── prompts/                 # hermes_system.md, patch_generation.md
-├── rag/
-│   ├── vector_store.py          # ChromaDB singleton (cosine, nomic-embed-text)
-│   ├── embedder.py              # nomic-embed-text via Ollama, retry/backoff
-│   ├── ingest_nvd.py            # RAG ingestion: NVD + Exploit-DB + ICS-CERT + Espressif
-│   └── query_chromadb.py        # ad-hoc CVE search helper
-├── skills/                      # Solution 3 learning loop (Son)
-│   ├── schema.py                # Skill = params + benchmark + approval lifecycle
-│   ├── store.py                 # JSONL persistence, latest-per-skill semantics
-│   ├── sandbox.py               # replay benchmark (attacks + normals) — no exec
-│   ├── inject.py                # atomic write to config/active_detection.json, auto-rollback
-│   └── hitl.py                  # propose → sandbox → Discord → approve → inject (CLI + auto)
-├── openclaw/                    # Execution layer (Duc)
-│   ├── firewall.py              # platform backends: iptables (SSH→Pi) / pf / netsh
-│   └── solution2.py             # quarantine executor: dry-run → enforce → verify → audit
-├── discord/
-│   └── discord_alerts.py        # Discord webhook — incident alerts + HITL approval (rate-limit safe)
-├── config/
-│   ├── device_registry.json     # Fleet config — device → solution track mapping
-│   ├── ewma_baseline.json       # Pre-seeded baseline (committed) — avoids cold-start poisoning
-│   ├── settings.py              # Typed settings, loads .env
-│   └── .env.example             # Required environment variables
-├── esp32-cam/                   # ESP32-CAM firmware (Vy) — dual-OTA + C telemetry agent
-│   ├── main/main.c              # OTA validate/rollback + telemetry → aes/telemetry/{id}
-│   ├── main/ewma.c              # EWMA in C
-│   ├── partitions.csv           # dual-OTA: nvs/otadata/phy_init/ota_0/ota_1
-│   └── OTA_LIFECYCLE.md         # rollback state machine
-├── gates/
-│   ├── semgrep/                 # Gate 1 (Vy) — aes_rules.yaml (CWE-119/416/78/798) + gate1.py
-│   └── gate2.py                 # Gate 2 — Compile-Boot-Diff harness (structure/compile/boot-diff)
-├── tests/
-│   ├── diagnostic.py            # Environment health check
-│   └── test_openai.py           # OpenAI API connectivity smoke test
-├── telemetry_sim.py             # Hardware stub — normal / --attack / --stealth modes over MQTT
-├── requirements.txt             # deps (paho-mqtt 1.x AND 2.x via agents/mqtt_compat.py)
-└── test_all.sh                  # Full stack health check
+```text
+ESP32 / camera
+  └─ mqtts:8883, per-device username, broker ACL bound to topic
+       └─ Monitor (strict registry + bounded payload/schema/queue)
+            ├─ Local SQLite vector index + local Ollama embeddings
+            ├─ Hermes verdict (untrusted model output, action/track allowlist)
+            └─ Response preparation
+                 ├─ strict firmware gates → HMAC-bound approval → signed install
+                 └─ gateway identity check → dry run → live quarantine → verify
 ```
 
-Runtime files (gitignored, created as the system runs): `aes_incidents.jsonl`, `aes_incidents.hashes`, `aes_normals.jsonl`, `config/active_detection.json`, `config/previous_detection.json`, `config/skills.jsonl`, and the ESP-IDF `esp32-cam/build/` output.
+The FastAPI dashboard requires `AES_DASHBOARD_TOKEN` for every API request. Its
+write endpoints do not use cookie authentication, so a cross-site request cannot
+approve a skill without the custom token. The legacy static dashboard constructs
+untrusted values as text nodes and loads no third-party JavaScript.
 
----
+Incident state is a projection backed by an append-only chained event log.
+Production requires `AES_AUDIT_HMAC_KEY`; the verifier replays the authenticated
+events and compares the resulting state to `aes_incidents.jsonl`.
 
-## Setup
+## Repository map
 
-### 1 — Clone the repo
+```text
+agents/                 detection, Intel retrieval, Hermes, response state machine
+dashboard/              token-protected FastAPI API and local console
+esp32-cam/              ESP-IDF firmware, TLS MQTT, dual OTA partitions
+gates/                  fail-closed Semgrep and strict hardware validation
+openclaw/               gateway quarantine backends
+rag/                    embedded SQLite vector index and ingestion
+raspberry-pi/           TLS Mosquitto/AP/receiver provisioning
+skills/                 bounded detector tuning and authenticated approval
+web/                    Next.js operator UI
+tests/                   unit and boundary tests
+```
+
+Runtime incidents, event logs, telemetry, vector data, patch artifacts, firmware
+builds, and secrets are ignored by Git.
+
+## Install
+
+Python 3.11+ and Node.js 22 are supported.
 
 ```bash
-git clone https://github.com/nguyennnssson/aes.git
-cd aes
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.lock
+
+cd web
+npm ci
 ```
 
-### 2 — Install system dependencies (Mac)
+The direct Python requirements are pinned in `requirements.txt`; the universal
+resolved dependency set used by CI is `requirements.lock`. Regenerate it with:
 
 ```bash
-brew install python@3.12 mosquitto ollama
+uv pip compile --universal requirements-dev.txt -o requirements.lock
 ```
 
-### 3 — Create virtual environment
+Install ESP-IDF and its bundled `esptool`/`espsecure` environment separately on
+the reference-hardware workstation. Those platform-specific signing and serial
+tools are deliberately excluded from the network-service dependency lock.
+
+The Intel index is embedded SQLite rather than a remotely exposed vector server:
 
 ```bash
-python3.12 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+ollama pull nomic-embed-text
+python -m rag.ingest_nvd
 ```
 
-### 4 — Connect OpenAI (pick one)
+The ingestion sources are NVD metadata, Exploit-DB catalogue metadata, CISA KEV,
+and curated Espressif advisories. AES does not ingest or execute exploit code.
+Only results meeting `INTEL_MIN_RELEVANCE` are supplied to Hermes.
 
-Hermes runs on OpenAI. Choose **either** backend — bring your own key or CLI:
+## Required secure configuration
 
-**Option A — OpenAI API key.** Get a key from <https://platform.openai.com/api-keys> and:
+Keep all values in an ignored `.env`, a service environment file, or a secret
+manager. Do not commit them.
 
 ```bash
-export HERMES_BACKEND="openai"
-export OPENAI_API_KEY="<your-key>"          # your key — never commit it
+# MQTT monitor identity
+MQTT_HOST=192.168.4.1
+MQTT_PORT=8883
+MQTT_MONITOR_USERNAME=aes-monitor
+MQTT_MONITOR_PASSWORD=<unique password>
+MQTT_CA_CERT=/absolute/path/to/aes-ca.crt
+
+# Dashboard and authenticated audit/approval records
+AES_DASHBOARD_TOKEN=<random token>
+AES_AUDIT_HMAC_KEY=<at least 32 random characters>
+AES_DEPLOY_APPROVAL_KEY=<at least 32 random characters>
+AES_SKILL_APPROVAL_KEY=<at least 32 random characters>
+AES_BENCHMARK_HMAC_KEY=<at least 32 random characters>
+
+# Production guardrails
+AES_PRODUCTION=1
+
+# OpenAI Responses API backend (independently configurable roles)
+HERMES_BACKEND=openai
+HERMES_MODEL=gpt-5.6-sol
+HERMES_CODE_MODEL=gpt-5.6-sol
 ```
 
-**Option B — Codex CLI (no API key).** Install the [Codex CLI](https://developers.openai.com/codex/cli) and sign in with your ChatGPT account (`codex login`), then:
+`AES_INSECURE_DEV_MQTT=1` is an explicit loopback-only development escape hatch.
+Secure MQTT is the default. Unknown device IDs are rejected by default;
+`AES_ALLOW_UNREGISTERED_DEVICES=1` is development-only.
+
+The Codex CLI backend runs in an isolated temporary workspace with a scrubbed
+environment. It is disabled when `AES_PRODUCTION=1` unless an operator explicitly
+sets `AES_ALLOW_AGENTIC_LLM=1` after reviewing that risk. The non-agentic OpenAI
+API backend is the recommended production backend.
+
+## Raspberry Pi gateway
+
+Run `raspberry-pi/setup_ap.sh` as root with these provisioning inputs:
+
+- `AES_AP_PASSPHRASE`
+- `AES_MQTT_MONITOR_PASSWORD`
+- `AES_MQTT_RECEIVER_PASSWORD`
+- `AES_MQTT_DEVICE_CREDENTIALS_FILE` (`device-id:unique-password` per line)
+- `AES_DEVICE_LEASES_FILE` (`mac,192.168.4.10-50,device-id` per line)
+- `AES_MQTT_CA_CERT_SOURCE`, `AES_MQTT_SERVER_CERT_SOURCE`, and
+  `AES_MQTT_SERVER_KEY_SOURCE`
+- optional `AES_SERVICE_USER` (defaults to `pi` and must already exist)
+
+The installer refuses the repository passphrase placeholder, configures TLS on
+port 8883, disables anonymous access, installs topic ACLs and static leases, and
+runs the telemetry receiver with systemd filesystem restrictions. Passwords must
+be unique, 16 or more characters, and use the installer's shell-safe character
+set. The gateway certificate must chain to the supplied CA, match its private key,
+and contain an IP subjectAltName for `192.168.4.1`.
+
+Closed-firmware devices also need matching `ip` and `mac` fields in
+`config/device_registry.json`. Quarantine is refused if the gateway's neighbor
+table does not match the pinned identity. Set `GATEWAY_SSH` when the response
+process is not itself running on the forwarding gateway.
+
+## ESP32 provisioning
+
+Put build secrets in ignored `esp32-cam/sdkconfig.secrets`:
+
+```text
+CONFIG_AES_DEVICE_ID="esp32-cam-01"
+CONFIG_AES_FIRMWARE_VERSION="0.1.0"
+CONFIG_AES_WIFI_PASSWORD="<AP passphrase>"
+CONFIG_AES_MQTT_USERNAME="esp32-cam-01"
+CONFIG_AES_MQTT_PASSWORD="<unique device password>"
+CONFIG_AES_MQTT_BROKER_URI="mqtts://192.168.4.1:8883"
+```
+
+Provision ignored `esp32-cam/main/srv_cert.crt` with the trusted public gateway
+CA certificate for the build; never copy the CA private key. For production,
+build with the production security profile
+and external signing/encryption keys:
 
 ```bash
-export HERMES_BACKEND="codex"               # uses your ChatGPT subscription auth
-# Leave HERMES_CLI_MODEL unset → Codex uses its own configured model.
-# (A ChatGPT-account login rejects models it isn't entitled to, e.g. gpt-5-codex.)
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.production.defaults;\
+sdkconfig.secrets" idf.py build
 ```
 
-Model selection for **Option A (the API backend) only** — the Codex CLI ignores these and uses its own configured model:
+Secure-boot and flash-encryption eFuse provisioning is irreversible; follow the
+Espressif production guide and preserve recovery keys offline. AES additionally
+requires `AES_HARDWARE_SECURITY_VERIFIED=1` and verifies the firmware signature
+with `AES_FIRMWARE_PUBLIC_KEY` before a physical installation.
+
+## Run
 
 ```bash
-export HERMES_MODEL="gpt-5"                 # reasoning model (point at gpt-6 when available)
-export HERMES_CODE_MODEL="gpt-5-codex"      # Codex — firmware patch generation
+python -m agents.monitor_agent_mqtt
+
+# In a separate terminal, development broker only:
+AES_INSECURE_DEV_MQTT=1 MQTT_PORT=1883 python telemetry_sim.py
+
+AES_DASHBOARD_TOKEN=<token> uvicorn dashboard.app:app --host 127.0.0.1 --port 8000
 ```
 
-Then copy `config/.env.example` to `.env` for the rest (or export directly, add to `~/.zshrc`):
+Do not bind the dashboard to a LAN address unless TLS is terminated in front of
+it and `AES_DASHBOARD_HOSTS` / `AES_DASHBOARD_ORIGINS` explicitly name that host.
+
+## Firmware remediation lifecycle
+
+Gate 2 is strict by default. A deployable run requires all of:
+
+- `idf.py` and a clean staged build;
+- `GATE2_REFERENCE_PORT` and `GATE2_REFERENCE_DEVICE`;
+- an executable `GATE2_ATTACK_HARNESS` that accepts `--device` and `--port`;
+- authenticated MQTT monitor credentials and a private CA;
+- a labelled historical attack regression corpus;
+- clean authenticated telemetry during the active replay.
+
+If any item is absent, Gate 2 rejects the patch. `--allow-skips` is only for a
+diagnostic invocation and response-agent code will not accept that result.
+
+After validation:
 
 ```bash
-export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."   # optional — incident alerts
+AES_DEPLOY_APPROVAL_KEY=<key> \
+  python -m agents.response_agent approve <incident-id> <approver>
 
-# Optional — execution layer (defaults are the safe bench mode):
-export AES_FLASH_ENFORCE=1             # Sol 1 actually builds+flashes (HITL-gated; default holds for approval)
-export AES_FIREWALL_ENFORCE=1          # Sol 2 writes REAL firewall rules (gateway only)
-export GATEWAY_SSH="pi@192.168.4.1"    # Sol 2 enforces on the Pi over SSH instead of locally
-export AES_GATE2_STRICT=1              # Gate 2: skipped stages block the flash (production)
-export GATE2_REFERENCE_PORT=COM7       # Gate 2 boot-diff: reference ESP32 serial port
-export GATE2_REFERENCE_DEVICE=esp32-cam-ref  # Gate 2 boot-diff: only THIS device's telemetry proves boot
-export AES_STRICT_REGISTRY=1           # Monitor rejects telemetry from unregistered device ids
-export AES_ALLOW_VULN_SOURCE=1         # Sol 1 patches main_vulnerable.c (intentional CWE demo) instead of main.c
+AES_FLASH_ENFORCE=1 \
+AES_DEPLOY_APPROVAL_KEY=<same-key> \
+AES_FIRMWARE_PUBLIC_KEY=/path/to/public-key.pem \
+AES_HARDWARE_SECURITY_VERIFIED=1 \
+  python -m agents.response_agent flash <incident-id>
 ```
 
-Then reload: `source ~/.zshrc`
+Approval signs the incident ID, device ID, firmware version, original source
+hash, patched-source hash, patch hash, firmware hash, and artifact path. Source,
+version, or artifact drift invalidates the approval. Rejected artifacts are
+moved out of `pending/`; a successful install moves them to `deployed/`.
 
-### 5 — Start services
+## Detector tuning corpus
+
+Detector-created incidents and device-declared “normal” readings are not
+independent ground truth. They cannot certify a tuning proposal. An operator must
+review and sign samples with `scripts/label_sample.py` and
+`AES_BENCHMARK_HMAC_KEY`. A benchmark requires at least one authenticated ATTACK
+and NORMAL sample, plus the detection/false-positive thresholds in
+`skills/sandbox.py`.
+
+Skill approval additionally requires `AES_SKILL_APPROVAL_KEY`; changing params or
+benchmark data after approval invalidates injection.
+
+## Verification
 
 ```bash
-mosquitto -d                       # broker, anonymous port 1883 (Phase 0)
-brew services start ollama
-ollama pull nomic-embed-text       # REQUIRED — Intel Agent embeds queries via Ollama
+pytest tests -q
+python tests/diagnostic.py
+python -c \
+  "from agents.monitor_agent import verify_incident_log as v; print(v() or 'OK')"
+
+cd web
+npm audit --omit=dev --audit-level=high
+npm run typecheck
+npm run build
 ```
 
-> **Ollama must be running** whenever the pipeline runs: the Intel Agent embeds every query through it. If it's down, Intel degrades to "no CVE context" rather than crashing, but you lose RAG grounding.
-
-### 6 — Populate CVE database (takes ~10 min)
-
-```bash
-source venv/bin/activate
-python3 -m rag.ingest_nvd
-# Stores ~1000+ documents in ChromaDB from NVD, Exploit-DB, ICS-CERT, Espressif
-```
-
----
-
-## Running (demo runbook — order matters)
-
-```bash
-cd ~/aes
-source venv/bin/activate
-```
-
-**Terminal 1 — Monitor Agent (keep running):**
-```bash
-python3 -m agents.monitor_agent_mqtt
-```
-> The monitor is quiet by default — it prints anomalies and "elevated" readings plus a periodic `🟢 fleet quiet` heartbeat, and suppresses routine normal lines so incident blocks stand out.
-
-**Terminal 2 — Simulate device telemetry:**
-```bash
-# 1) NORMAL mode FIRST — let it run ~1–2 min.
-#    This seeds aes_normals.jsonl, the false-positive corpus the learning
-#    loop needs before it can certify any skill. (Baseline is pre-seeded,
-#    so detection is live from the first reading.)
-python3 telemetry_sim.py
-
-# 2) THEN trigger an attack (Ctrl-C the normal sim first, or run a second device):
-python3 telemetry_sim.py --attack esp32-cam-01
-python3 telemetry_sim.py --attack all
-```
-
-> Do **not** start in `--attack` mode on a brand-new baseline. The pre-seeded
-> `config/ewma_baseline.json` prevents this, but if you wipe it, run normal
-> mode long enough to rebuild a clean baseline first.
-
-When an attack is detected (the monitor logs the incident inline, then a background worker runs the rest so detection never pauses):
-1. Incident logged to `aes_incidents.jsonl` (immutable facts hashed to `aes_incidents.hashes`)
-2. Intel Agent queries ChromaDB for relevant CVEs
-3. Hermes analyzes and returns a verdict — **live**
-4. Response Agent routes to Solution 1/2 (Sol 3 — the learning loop — runs from the monitor path); `INVESTIGATE`/low-confidence verdicts are **held for manual review**. Sol 1 validates the patch (Gate 1 + Gate 2) then **holds the physical flash for approval** unless `AES_FLASH_ENFORCE=1`; Sol 2 dry-runs unless `AES_FIREWALL_ENFORCE=1`.
-5. Discord `#aes-alerts` receives a structured alert
-6. The learning loop proposes tuned detection params → sandbox benchmark → posts to Discord for ✅
-
-**Approve a proposed skill (Solution 3):**
-```bash
-python3 -m skills.hitl list
-python3 -m skills.hitl approve <skill_id>     # injects live; monitor adopts it next reading
-python3 -m skills.hitl reject  <skill_id>
-```
-
-**Verify the incident log hasn't been tampered with:**
-```bash
-python3 -c "from agents.monitor_agent import verify_incident_log as v; print(v() or 'OK')"
-```
-
-**Full health check:**
-```bash
-bash test_all.sh
-```
-
-### Self-improvement before/after (the core demo)
-
-`--stealth` publishes a throttled, low-and-slow attack (~45% spikes) that sits just under the shipped `0.5` threshold, so the default rule **misses** it. This sequence shows the system learn to catch it:
-
-```bash
-python3 telemetry_sim.py                          # 1. normal ~1-2 min (seeds a clean FP corpus)
-python3 telemetry_sim.py --stealth esp32-cam-01   # 2. BEFORE: reads ~45% but verdict stays "Normal" — missed
-#    Ctrl-C after a few ticks
-python3 telemetry_sim.py --attack esp32-cam-01    # 3. loud attack → incident → loop proposes a tighter threshold
-#    Ctrl-C once the incident fires
-python3 -m skills.hitl approve <skill_id>         # 4. inject the tightened params
-python3 telemetry_sim.py --stealth esp32-cam-01   # 5. AFTER: the SAME stealth attack now 🚨 ANOMALY
-```
-
-The loud attack (step 3) is what *triggers* the loop — a missed stealth attack can't. After approval, `config/active_detection.json` holds the tightened params and the running monitor adopts them on its next reading. (Incident alerts now report a real detect→respond latency, not 0ms.)
-
----
-
-## Dashboard (local web app)
-
-A deployable FastAPI dashboard that runs on the **same host as the pipeline** and reads the files it already writes — live fleet tiles, incident feed, the self-improvement chart, and the pending Hermes skills with **Approve / Reject buttons** so you never paste a CLI command. Approve calls the real injector → the running monitor adopts the new params on its next reading.
-
-```bash
-pip install fastapi "uvicorn[standard]"            # one-time
-uvicorn dashboard.app:app --host 127.0.0.1 --port 8000
-# open http://localhost:8000   (keep the monitor running — it writes config/fleet_status.json for the tiles)
-```
-
-Localhost-only by default. To let others on the same network view it (projector / phones), bind `--host 0.0.0.0` and open `http://<host-ip>:8000`. It controls live detection, so never expose it to the public internet.
-
----
-
-## Device Fleet
-
-| Device | Model | Solution | Status |
-|---|---|---|---|
-| esp32-cam-01 | ESP32-CAM | Track 1 (OTA patch) | Live |
-| esp32-cam-02 | ESP32-CAM | Track 1 (OTA patch) | Bench-ready |
-| esp32-cam-03 | ESP32-CAM | Track 1 (OTA patch) | Bench-ready |
-| tapo-c200-01 | TP-Link Tapo C200 | Track 2 (whitelist) | Live |
-
----
-
-## RAG Knowledge Base
-
-ChromaDB + nomic-embed-text. Four ingestion sources:
-
-| Source | Content | Size |
-|---|---|---|
-| NVD | Full CVE corpus with CVSS scores | ~450 entries |
-| Exploit-DB | PoC exploit code (used in Gate 2) | ~566 entries |
-| ICS-CERT/CISA | Known exploited IoT/OT vulnerabilities | ~74 entries |
-| Espressif | ESP32-specific advisories (curated from vendor disclosure) | 16 advisories ✅ |
-
----
-
-## Validation Gates
-
-**Gate 1 — Semgrep static analysis** — ✅ built (`gates/semgrep/`)
-CWE-119 (buffer overflow) · CWE-416 (use-after-free) · CWE-78 (command injection) · CWE-798 (hardcoded credentials, incl. `#define`)
-
-**Gate 2 — two parts:**
-- *On-device validate/rollback* (`esp32-cam/main/main.c`) — ✅ built. New firmware self-confirms (WiFi + MQTT handshake) within 30s or auto-reverts to the previous partition.
-- *Compile-Boot-Diff harness* (`gates/gate2.py`) — ✅ built and wired into the Solution 1 pipeline. Three stages, each reporting pass/fail/skipped: **structure** (patched source is well-formed, no diff artifacts), **compile** (`idf.py build` of the staged patch — skipped without the ESP-IDF toolchain), **boot-diff** (flash the reference ESP32 set in `GATE2_REFERENCE_PORT`, confirm MQTT boot in 35s, replay recorded attacks and confirm clean fresh telemetry — skipped without hardware). Default = skipped stages don't block; set `AES_GATE2_STRICT=1` (production/demo-day) so anything untested blocks the flash.
-
----
-
-## Hardware requirements & bench mode
-
-AES runs end-to-end **without any hardware** — every step that needs a physical
-device or the ESP-IDF toolchain self-skips with a clear log line, so you can
-develop and demo the full pipeline on a laptop. The hardware-gated steps:
-
-- **Solution 1 (OTA patch)** runs the full pipeline today; the `idf.py build` /
-  `esptool.py` flash / boot-confirm steps self-skip when no toolchain or device
-  is attached. With hardware: plug in the ESP32, set `port` in
-  `config/device_registry.json`, and run one real OTA flash.
-- **Solution 2 (firewall)** always dry-runs; it writes real firewall rules only
-  where `AES_FIREWALL_ENFORCE=1` is set (the gateway). Roll back anytime:
-  `python -m openclaw.solution2 release <device_id>`.
-- **Gate 2** compile and boot-diff stages self-skip without the ESP-IDF toolchain
-  or a reference device (`GATE2_REFERENCE_PORT`). Set `AES_GATE2_STRICT=1` so any
-  untested stage blocks the flash.
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the engineering history.
-
----
-
-## Team
-
-| Name | Role |
-|---|---|
-| Son Nguyen | AI Infra — Hermes, RAG pipeline, learning loop, Discord bot |
-| Duc Vu | Software/Pipeline — OpenClaw integrations, firewall, response routing |
-| Vy Tuong Khong | Firmware — ESP32 flashing, Gate 1/2 harnesses, OTA partition |
-
----
+CI runs the locked Python dependency audit, unit and pipeline tests, the web audit,
+typecheck/build, and an ESP-IDF firmware build. See `SECURITY.md` for private
+vulnerability reporting.
 
 ## License
 
-Released under the [MIT License](LICENSE) — © 2026 Son Nguyen and the AES contributors.
+MIT — © 2026 Son Nguyen and AES contributors.

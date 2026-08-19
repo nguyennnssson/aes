@@ -35,6 +35,7 @@ from pathlib import Path
 
 from agents.monitor_agent import evaluate_detection
 from skills.schema import Skill, BenchmarkResult
+from skills.trusted_labels import verify_ground_truth
 
 _INCIDENTS_PATH = Path(__file__).parent.parent / "aes_incidents.jsonl"
 _NORMALS_PATH   = Path(__file__).parent.parent / "aes_normals.jsonl"
@@ -65,13 +66,13 @@ class Sandbox:
         # we previously missed" — the stealth before/after demo is the evidence for
         # the latter (a missed attack cannot appear in this corpus by construction).
         all_incidents = self._load_jsonl(self.incidents_path)
-        attacks = [a for a in all_incidents if not a.get("demo")]
+        attacks = [a for a in all_incidents if not a.get("demo") and self._trusted_label(a, "ATTACK")]
         excluded = len(all_incidents) - len(attacks)
         if excluded:
             print(f"[SANDBOX] Excluded {excluded} demo incident(s) from the attack corpus")
         # Normals: sampled NORMAL readings (status guard keeps this honest if the
         # files ever share a path).
-        normals = [n for n in self._load_jsonl(self.normals_path) if n.get("status") == "NORMAL"]
+        normals = [n for n in self._load_jsonl(self.normals_path) if self._trusted_label(n, "NORMAL")]
 
         print(f"[SANDBOX] {len(attacks)} attack incidents, {len(normals)} normal readings")
         if not normals:
@@ -91,6 +92,7 @@ class Sandbox:
             latency_ms          = latency_ms,
             sample_size         = len(attacks) + len(normals),
             normal_sample_size  = len(normals),
+            attack_sample_size  = len(attacks),
         )
         skill.benchmark = result
 
@@ -125,3 +127,11 @@ class Sandbox:
             if is_anomaly:
                 flagged += 1
         return round(flagged / len(samples), 4)
+
+    def _trusted_label(self, sample: dict, expected: str) -> bool:
+        """Accept only operator-labelled, HMAC-authenticated ground truth.
+
+        Device telemetry and detector-created incidents are not independent
+        labels and therefore cannot certify a detector rewrite.
+        """
+        return verify_ground_truth(sample, expected)

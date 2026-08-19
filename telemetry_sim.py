@@ -21,19 +21,18 @@ Publish rate: every 5 seconds per device
 
 import argparse
 import json
+import os
 import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import paho.mqtt.client as mqtt
-
-from agents.mqtt_compat import make_mqtt_client
+from agents.mqtt_compat import configure_mqtt_client, make_mqtt_client
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-BROKER_HOST       = "localhost"
-BROKER_PORT       = 1883
+BROKER_HOST       = os.getenv("MQTT_HOST", "localhost")
+BROKER_PORT       = int(os.getenv("MQTT_PORT", "8883"))
 PUBLISH_INTERVAL  = 5   # seconds between readings
 TELEMETRY_DIR     = Path("data/telemetry")
 SIM_STATE_PATH    = Path("config/sim_state.json")
@@ -265,6 +264,7 @@ def main():
 
     # Connect to Mosquitto
     client = make_mqtt_client("aes-telemetry-sim")
+    configure_mqtt_client(client, role="simulator")
     client.on_connect = on_connect
     client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
     client.loop_start()

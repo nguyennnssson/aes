@@ -6,13 +6,13 @@
 #
 # Duc's work (Milestones 1-4):
 #
-#   solution1.py  — OTA patch pipeline for ESP32-CAM (open firmware).
+#   response_agent.py owns the signed firmware remediation pipeline for ESP32-CAM.
 #                   Steps: checkout repo → isolate vulnerable module → pass to Hermes
 #                   for patch → Gate 1 (Semgrep) → Gate 2 (Compile-Boot-Diff) →
-#                   esptool.py OTA push → dual-partition atomic switch → verify boot.
+#                   signed serial install → authenticated fresh-boot proof.
 #                   NEVER skip Gate 1 or Gate 2. Failed patches go to outputs/patches/failed/.
 #
-#   solution2.py  — Network whitelist for closed-firmware devices (Tapo C200, etc.).
+#   solution2.py  — Gateway quarantine for closed-firmware devices.
 #                   Steps: iptables --check dry-run ALWAYS FIRST → write block rule
 #                   to Raspberry Pi gateway via SSH → verify traffic drops.
 #                   NEVER write a live iptables rule without dry-run passing first.
@@ -20,7 +20,5 @@
 #   gateway.py    — SSH client for the Raspberry Pi gateway.
 #                   Used by solution2.py for iptables writes.
 #
-# Interface contract with response_agent.py:
-#   solution1.handle(incident, verdict) -> bool
-#   solution2.handle(incident, verdict) -> bool
-#   Both return True on success, False on failure (triggers retry in response_agent).
+# Handlers return "resolved", "pending", or "failed" so validation/dry-run can
+# never be confused with enforcement.

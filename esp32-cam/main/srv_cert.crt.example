@@ -1,0 +1,5 @@
+Provision this ignored file as main/srv_cert.crt before building firmware.
+
+It must contain the PEM-encoded public CA certificate that issued the MQTT
+gateway certificate for 192.168.4.1. Never place the CA private key here and
+never commit a production trust anchor or private key to this repository.

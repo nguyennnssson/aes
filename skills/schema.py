@@ -17,6 +17,10 @@ are Solutions 1 and 2 — not part of the learning loop.
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Optional
+import hashlib
+import hmac
+import json
+import os
 import uuid
 
 
@@ -41,6 +45,7 @@ class BenchmarkResult:
     latency_ms:          float = 0.0   # avg rule evaluation time in ms
     sample_size:         int   = 0     # total samples replayed (attacks + normals)
     normal_sample_size:  int   = 0     # normal readings available for the FP measurement
+    attack_sample_size:  int   = 0     # independently labelled attacks
 
     def passed(self, min_detection: float = 0.8, max_fp: float = 0.1) -> bool:
         """
@@ -49,7 +54,7 @@ class BenchmarkResult:
         Requires a non-empty normal corpus — otherwise the FP rate is unmeasured
         (always 0%) and the gate would be meaningless (audit finding C4).
         """
-        if self.normal_sample_size <= 0:
+        if self.normal_sample_size <= 0 or self.attack_sample_size <= 0:
             return False
         return self.detection_rate >= min_detection and self.false_positive_rate <= max_fp
 
@@ -58,7 +63,7 @@ class BenchmarkResult:
             f"detection={self.detection_rate:.0%} "
             f"fp={self.false_positive_rate:.0%} "
             f"latency={self.latency_ms:.1f}ms "
-            f"n={self.sample_size} (normals={self.normal_sample_size})"
+            f"n={self.sample_size} (attacks={self.attack_sample_size}, normals={self.normal_sample_size})"
         )
 
 
@@ -101,12 +106,44 @@ class Skill:
     status:      str           = PENDING_HITL
     approved_by: Optional[str] = None   # Discord username who clicked ✅
     approved_at: Optional[str] = None   # ISO timestamp of approval
+    approval_signature: Optional[str] = None
+
+    def _approval_payload(self) -> bytes:
+        bound = {
+            "skill_id": self.skill_id,
+            "version": self.version,
+            "params": self.params,
+            "benchmark": asdict(self.benchmark),
+        }
+        return json.dumps(bound, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
     def approve(self, approved_by: str) -> None:
         """Mark skill as approved after Discord ✅."""
+        key = os.getenv("AES_SKILL_APPROVAL_KEY", "")
+        if len(key) < 32:
+            raise ValueError("AES_SKILL_APPROVAL_KEY must contain at least 32 characters")
+        from agents.monitor_agent import validate_detection_params
+        validated = validate_detection_params(self.params)
+        if not validated or set(validated) != set(self.params):
+            raise ValueError("skill parameters are invalid")
+        if not self.benchmark.passed():
+            raise ValueError("skill does not have a passing authenticated benchmark")
+        if not isinstance(approved_by, str) or not approved_by or len(approved_by) > 128:
+            raise ValueError("approved_by must contain 1-128 characters")
+        self.params = validated
         self.status      = APPROVED
         self.approved_by = approved_by
         self.approved_at = datetime.now(timezone.utc).isoformat()
+        self.approval_signature = hmac.new(
+            key.encode("utf-8"), self._approval_payload(), hashlib.sha256
+        ).hexdigest()
+
+    def approval_is_valid(self) -> bool:
+        key = os.getenv("AES_SKILL_APPROVAL_KEY", "")
+        if self.status != APPROVED or len(key) < 32 or not self.approval_signature:
+            return False
+        expected = hmac.new(key.encode("utf-8"), self._approval_payload(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(self.approval_signature, expected)
 
     def reject(self) -> None:
         """Mark skill as rejected after Discord ❌ or sandbox failure."""

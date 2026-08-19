@@ -9,18 +9,21 @@ __pycache__/
 venv/
 .venv/
 
-# Isolated semgrep venv for Gate 1 (semgrep's deps conflict with chromadb, so it
-# is kept out of the main env — recreate with: python -m venv .tools/semgrep-venv
+# Isolated semgrep venv for Gate 1. Recreate with: python -m venv .tools/semgrep-venv
 # && .tools/semgrep-venv/Scripts/pip install semgrep)
 .tools/
 
-# ChromaDB data (large, regenerate with ingest_nvd.py)
+# Legacy and current local vector data (regenerate with ingest_nvd.py)
 aes_chromadb/
+data/aes_intel.sqlite3*
 
 # Incident logs + false-positive corpus (runtime data, not source)
 aes_incidents.jsonl
 aes_incidents.hashes
 aes_incidents.jsonl.tmp
+aes_incident_events.jsonl
+aes_incident_events.head
+aes_incident_events.head.tmp
 aes_normals.jsonl
 
 # Solution 3 runtime state (created on first inject — monitor falls back to defaults if absent)
@@ -38,11 +41,9 @@ config/sim_state.json
 # baseline that prevents cold-start poisoning. The monitor updates it at runtime;
 # if that churn is noisy, run: git update-index --assume-unchanged config/ewma_baseline.json
 
-# Pipeline runtime artifacts (generated per incident — not source)
-outputs/patches/pending/
-outputs/patches/failed/
-outputs/firewall/
-outputs/gate2/
+# Pipeline and local artifact-tool outputs (generated data, never source)
+/outputs/
+/.artifact_work/
 
 # Environment / secrets
 .env
@@ -64,9 +65,11 @@ tests/e2e/playwright-report/
 
 # ESP-IDF firmware build artifacts (regenerate with `idf.py build` — never commit)
 esp32-cam/build/
+esp32-cam/sdkconfig
 esp32-cam/sdkconfig.old
 # Per-build firmware secrets (WiFi password etc.) — see main/Kconfig.projbuild
 esp32-cam/sdkconfig.secrets
+esp32-cam/main/srv_cert.crt
 managed_components/
 dependencies.lock
 

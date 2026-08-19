@@ -14,6 +14,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Provision CI-only MQTT trust anchor
+        shell: bash
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj "/CN=AES CI MQTT CA" \
+            -keyout "$RUNNER_TEMP/aes-ci-mqtt-ca.key" \
+            -out esp32-cam/main/srv_cert.crt
+
       - name: Build firmware with ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:

@@ -35,6 +35,10 @@ import json
 import os
 import time
 import hashlib
+import hmac
+import math
+import threading
+import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +94,8 @@ def validate_detection_params(raw: dict) -> dict:
             val = float(raw[key])
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(val):
+            continue
         val = max(lo, min(hi, val))
         out[key] = int(val) if key == "simultaneous_threshold" else val
     return out
@@ -139,19 +145,41 @@ class Telemetry:
     def validate(self) -> list[str]:
         """Returns a list of validation errors. Empty list = valid."""
         errors = []
+        numeric = {
+            "cpu_percent": self.cpu_percent,
+            "memory_percent": self.memory_percent,
+            "packet_rate": self.packet_rate,
+            "connection_count": self.connection_count,
+        }
+        for name, value in numeric.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                errors.append(f"{name} must be a finite number")
+        if errors:
+            return errors
         if not (0.0 <= self.cpu_percent <= 100.0):
             errors.append(f"cpu_percent out of range: {self.cpu_percent}")
         if not (0.0 <= self.memory_percent <= 100.0):
             errors.append(f"memory_percent out of range: {self.memory_percent}")
-        if self.packet_rate < 0:
-            errors.append(f"packet_rate negative: {self.packet_rate}")
-        if self.connection_count < 0:
-            errors.append(f"connection_count negative: {self.connection_count}")
+        if not (0.0 <= self.packet_rate <= 1_000_000.0):
+            errors.append(f"packet_rate out of range: {self.packet_rate}")
+        if not (0 <= self.connection_count <= 1_000_000):
+            errors.append(f"connection_count out of range: {self.connection_count}")
         # Security: device_id must be non-empty and alphanumeric + hyphens only
         # (no injection). `all()` over an empty string is vacuously True, so the
         # emptiness check must be explicit (REVIEW P2-16).
-        if not self.device_id or not all(c.isalnum() or c == '-' for c in self.device_id):
+        if (not isinstance(self.device_id, str) or not self.device_id or len(self.device_id) > 64
+                or not all(c.isascii() and (c.isalnum() or c == '-') for c in self.device_id)):
             errors.append(f"device_id invalid or empty: {self.device_id!r}")
+        try:
+            parsed = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                errors.append("timestamp must include a timezone")
+            else:
+                age = abs((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+                if age > 300:
+                    errors.append(f"timestamp outside 5-minute freshness window: {self.timestamp}")
+        except (AttributeError, TypeError, ValueError):
+            errors.append(f"timestamp is not valid ISO-8601: {self.timestamp!r}")
         return errors
 
 
@@ -439,9 +467,16 @@ def evaluate_detection(deviations: dict, params: dict) -> tuple[bool, dict]:
         simultaneous_threshold — how many metrics must spike at once
     Returns (is_anomaly, spiking_metrics_dict).
     """
-    dev_threshold = params.get("deviation_threshold", MonitorAgent.DEVIATION_THRESHOLD)
-    sim_threshold = params.get("simultaneous_threshold", MonitorAgent.SIMULTANEOUS_THRESHOLD)
-    spiking = {m: d for m, d in deviations.items() if d >= dev_threshold}
+    safe_params = validate_detection_params(params)
+    dev_threshold = safe_params.get("deviation_threshold", MonitorAgent.DEVIATION_THRESHOLD)
+    sim_threshold = safe_params.get("simultaneous_threshold", MonitorAgent.SIMULTANEOUS_THRESHOLD)
+    clean = {}
+    if isinstance(deviations, dict):
+        for metric in ("cpu", "memory", "packet_rate", "connections"):
+            value = deviations.get(metric)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                clean[metric] = max(0.0, float(value))
+    spiking = {m: d for m, d in clean.items() if d >= dev_threshold}
     return len(spiking) >= sim_threshold, spiking
 
 
@@ -449,7 +484,109 @@ def evaluate_detection(deviations: dict, params: dict) -> tuple[bool, dict]:
 
 LOG_PATH = Path("./aes_incidents.jsonl")    # one JSON object per line
 HASH_PATH = Path("./aes_incidents.hashes")  # tamper-evident hash ledger
+EVENT_PATH = Path("./aes_incident_events.jsonl")
+EVENT_HEAD_PATH = Path("./aes_incident_events.head")
 NORMALS_PATH = Path("./aes_normals.jsonl")  # sampled normal readings (sandbox FP corpus)
+
+# The MQTT callback and remediation worker both update incident state. One shared
+# re-entrant lock prevents a read/replace update from dropping an incident that
+# was appended concurrently. It also serializes the audit event and projection.
+_INCIDENT_LOCK = threading.RLock()
+
+
+def _canonical(value: dict) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _audit_digest(payload: str, algorithm: str | None = None) -> str:
+    key = os.getenv("AES_AUDIT_HMAC_KEY", "").encode("utf-8")
+    selected = algorithm or ("hmac-sha256" if key else "sha256")
+    if selected == "hmac-sha256":
+        if not key:
+            return ""
+        return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _append_audit_event(incident_id: str, event_type: str, payload: dict):
+    """Append a full-state audit event chained to the prior event.
+
+    Set AES_AUDIT_HMAC_KEY in every production process. Without it the chain is
+    useful for accidental-corruption detection only; production startup rejects
+    that mode in monitor_agent_mqtt.main().
+    """
+    previous = "GENESIS"
+    sequence = 1
+    if EVENT_PATH.exists():
+        lines = [line for line in EVENT_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if lines:
+            last = json.loads(lines[-1])
+            previous = last["signature"]
+            sequence = int(last["sequence"]) + 1
+    event = {
+        "sequence": sequence,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "incident_id": incident_id,
+        "event_type": event_type,
+        "payload": payload,
+        "previous": previous,
+        "algorithm": "hmac-sha256" if os.getenv("AES_AUDIT_HMAC_KEY") else "sha256",
+    }
+    event["signature"] = _audit_digest(_canonical(event))
+    with open(EVENT_PATH, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    head = {"sequence": sequence, "signature": event["signature"], "algorithm": event["algorithm"]}
+    head["auth"] = _audit_digest(_canonical(head))
+    tmp = EVENT_HEAD_PATH.with_suffix(".head.tmp")
+    tmp.write_text(json.dumps(head), encoding="utf-8")
+    os.replace(tmp, EVENT_HEAD_PATH)
+
+
+def _ensure_audit_seeded():
+    """Import legacy projection rows once before the first chained event."""
+    if (EVENT_PATH.exists() and EVENT_PATH.stat().st_size) or not LOG_PATH.exists():
+        return
+    for raw in LOG_PATH.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        incident_id = entry.get("incident_id")
+        if incident_id:
+            _append_audit_event(incident_id, "detected", entry)
+
+
+def update_incident_entry(incident_id: str, fields: dict) -> bool:
+    """Atomically update the incident projection and record every changed field."""
+    with _INCIDENT_LOCK:
+        if not LOG_PATH.exists():
+            return False
+        _ensure_audit_seeded()
+        updated = []
+        found = False
+        for line in LOG_PATH.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                updated.append(line)
+                continue
+            if entry.get("incident_id") == incident_id:
+                entry.update(fields)
+                found = True
+            updated.append(json.dumps(entry, allow_nan=False))
+        if not found:
+            return False
+        _append_audit_event(incident_id, "updated", fields)
+        tmp = LOG_PATH.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        os.replace(tmp, LOG_PATH)
+        return True
 
 
 def write_normal_sample(result: AnomalyResult):
@@ -461,7 +598,8 @@ def write_normal_sample(result: AnomalyResult):
     entry = {
         "timestamp":  result.timestamp,
         "device_id":  result.device_id,
-        "status":     "NORMAL",
+        "status":     "UNVERIFIED_NORMAL",
+        "label_source": "device-telemetry-unverified",
         "deviations": result.deviations,
         "baseline":   result.baseline,
     }
@@ -488,6 +626,62 @@ def verify_incident_log() -> list:
     Run: python -c "from agents.monitor_agent import verify_incident_log as v; print(v() or 'OK')"
     """
     problems = []
+    if EVENT_PATH.exists() and EVENT_PATH.stat().st_size:
+        projected = {}
+        previous = "GENESIS"
+        expected_sequence = 1
+        last_event = None
+        for raw in EVENT_PATH.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            try:
+                event = json.loads(raw)
+                signature = event.pop("signature")
+            except (json.JSONDecodeError, KeyError):
+                problems.append("unparseable audit event")
+                continue
+            if event.get("sequence") != expected_sequence:
+                problems.append(f"audit sequence break at {event.get('sequence')}")
+            if event.get("previous") != previous:
+                problems.append(f"audit chain break at sequence {event.get('sequence')}")
+            if _audit_digest(_canonical(event), event.get("algorithm")) != signature:
+                problems.append(f"audit signature mismatch at sequence {event.get('sequence')}")
+            iid = event.get("incident_id")
+            if event.get("event_type") == "detected":
+                projected[iid] = dict(event.get("payload") or {})
+            elif event.get("event_type") == "updated" and iid in projected:
+                projected[iid].update(event.get("payload") or {})
+            previous = signature
+            expected_sequence += 1
+            last_event = {"sequence": event.get("sequence"), "signature": signature,
+                          "algorithm": event.get("algorithm")}
+
+        if last_event and EVENT_HEAD_PATH.exists():
+            try:
+                head = json.loads(EVENT_HEAD_PATH.read_text(encoding="utf-8"))
+                auth = head.pop("auth")
+                if head != last_event or _audit_digest(_canonical(head), head.get("algorithm")) != auth:
+                    problems.append("audit head mismatch — log may be truncated")
+            except (json.JSONDecodeError, KeyError):
+                problems.append("audit head is invalid")
+        elif last_event:
+            problems.append("audit head missing — log may be truncated")
+
+        actual = {}
+        if LOG_PATH.exists():
+            for raw in LOG_PATH.read_text(encoding="utf-8").splitlines():
+                try:
+                    item = json.loads(raw)
+                    actual[item.get("incident_id")] = item
+                except json.JSONDecodeError:
+                    problems.append("unparseable log line")
+        for iid, expected in projected.items():
+            if actual.get(iid) != expected:
+                problems.append(f"{iid}: projection differs from authenticated audit history")
+        for iid in actual.keys() - projected.keys():
+            problems.append(f"{iid}: projection has no audit history")
+        return problems
+
     if not LOG_PATH.exists() or not HASH_PATH.exists():
         return ["incident log or hash ledger missing"]
 
@@ -524,6 +718,31 @@ def verify_incident_log() -> list:
     return problems
 
 
+def initialize_incident_audit(production: bool = False) -> list[str]:
+    """Validate existing history and migrate a valid legacy ledger to events.
+
+    Callers must refuse state-changing work when the returned list is non-empty.
+    This prevents a tampered projection or truncated event chain from being used
+    as the authorization basis for a remediation.
+    """
+    with _INCIDENT_LOCK:
+        if production and len(os.getenv("AES_AUDIT_HMAC_KEY", "")) < 32:
+            return ["AES_AUDIT_HMAC_KEY must contain at least 32 characters"]
+        event_present = EVENT_PATH.exists() and EVENT_PATH.stat().st_size > 0
+        if event_present:
+            return verify_incident_log()
+        if EVENT_HEAD_PATH.exists():
+            return ["audit head exists without an event log"]
+        any_legacy = LOG_PATH.exists() or HASH_PATH.exists()
+        if not any_legacy:
+            return []
+        legacy_problems = verify_incident_log()
+        if legacy_problems:
+            return legacy_problems
+        _ensure_audit_seeded()
+        return verify_incident_log()
+
+
 def write_incident_log(result: AnomalyResult, device_info: dict):
     """
     Writes an anomaly event to the incident log.
@@ -531,7 +750,7 @@ def write_incident_log(result: AnomalyResult, device_info: dict):
     with the log is detectable via verify_incident_log() even after status edits.
     """
     entry = {
-        "incident_id":   f"INC-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{result.device_id}",
+        "incident_id":   f"INC-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{result.device_id}",
         "timestamp":     result.timestamp,
         "device_id":     result.device_id,
         "device_model":  device_info.get("model", "unknown"),
@@ -540,21 +759,23 @@ def write_incident_log(result: AnomalyResult, device_info: dict):
         "reason":        result.reason,
         "deviations":    result.deviations,
         "baseline":      result.baseline,
-        "status":        "OPEN",  # Duc's response agent will update this to RESOLVED
+        "status":        "OPEN",  # remains open until enforcement is independently verified
         "stage":         "monitor_logged",  # live pipeline progress for the dashboard
     }
 
-    entry_json = json.dumps(entry)
+    with _INCIDENT_LOCK:
+        _ensure_audit_seeded()
+        _append_audit_event(entry["incident_id"], "detected", entry)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, allow_nan=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
-    # Write the log entry
-    with open(LOG_PATH, "a") as f:
-        f.write(entry_json + "\n")
-
-    # Write the hash over the immutable core only, so a later status update
-    # (RESOLVED/FAILED/verdict) doesn't break verification (audit finding M5).
-    entry_hash = hashlib.sha256(_incident_core(entry).encode()).hexdigest()
-    with open(HASH_PATH, "a") as f:
-        f.write(f"{entry['incident_id']}:{entry_hash}\n")
+        # Retained for backward compatibility with existing tooling. The event
+        # chain above is authoritative and covers later status/verdict changes.
+        entry_hash = hashlib.sha256(_incident_core(entry).encode()).hexdigest()
+        with open(HASH_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{entry['incident_id']}:{entry_hash}\n")
 
     return entry["incident_id"]
 

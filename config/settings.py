@@ -23,11 +23,11 @@ load_dotenv(_ENV_PATH)
 class Settings:
     # OpenAI
     openai_api_key: str
-    hermes_model: str        # reasoning model — gpt-5 (point at gpt-6 when available)
-    hermes_code_model: str   # patch generation — Codex (gpt-5-codex)
+    hermes_model: str        # reasoning model
+    hermes_code_model: str   # firmware patch-generation model
 
-    # ChromaDB
-    chroma_persist_dir: str
+    # Local Intel vector index
+    intel_db_path: str
 
     # MQTT
     mqtt_host: str
@@ -55,11 +55,11 @@ def load() -> Settings:
 
     return Settings(
         openai_api_key      = openai_api_key,
-        hermes_model        = os.getenv("HERMES_MODEL", "gpt-5"),
-        hermes_code_model   = os.getenv("HERMES_CODE_MODEL", "gpt-5-codex"),
-        chroma_persist_dir  = os.getenv("CHROMA_PERSIST_DIR", "./aes_chromadb"),
+        hermes_model        = os.getenv("HERMES_MODEL", "gpt-5.6-sol"),
+        hermes_code_model   = os.getenv("HERMES_CODE_MODEL", "gpt-5.6-sol"),
+        intel_db_path       = os.getenv("AES_INTEL_DB", "./data/aes_intel.sqlite3"),
         mqtt_host           = os.getenv("MQTT_HOST", "localhost"),
-        mqtt_port           = int(os.getenv("MQTT_PORT", "1883")),
+        mqtt_port           = int(os.getenv("MQTT_PORT", "8883")),
         discord_webhook_url = os.getenv("DISCORD_WEBHOOK_URL", ""),
         nvd_api_key         = os.getenv("NVD_API_KEY", ""),
     )

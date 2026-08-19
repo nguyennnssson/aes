@@ -1,29 +1,14 @@
 """
 AES — Intel Agent: Query the CVE Knowledge Base
-Run this AFTER ingest_nvd.py has populated ChromaDB.
+Run this AFTER ingest_nvd.py has populated the local AES vector index.
 
 This is what fires during a real incident: takes an attack description,
-searches ChromaDB for the most relevant CVEs, and returns them as context.
+searches the local vector index for the most relevant CVEs and returns context.
 """
 
-import chromadb
-from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
+from rag.vector_store import get_collection
 
-CHROMA_PATH = "./aes_chromadb"
-
-# Must match ingest_nvd.py exactly — same model, same URL
-nomic_ef = OllamaEmbeddingFunction(
-    model_name="nomic-embed-text",
-    url="http://localhost:11434/api/embeddings",
-)
-
-# Connect to the same database ingest_nvd.py created
-client = chromadb.PersistentClient(path=CHROMA_PATH)
-collection = client.get_or_create_collection(
-    name="cve_knowledge_base",
-    embedding_function=nomic_ef,
-    metadata={"hnsw:space": "cosine"}
-)
+collection = get_collection()
 
 
 def query_intel(device_model: str, attack_signature: str, top_k: int = 10) -> str:
@@ -62,8 +47,7 @@ def query_intel(device_model: str, attack_signature: str, top_k: int = 10) -> st
         results["metadatas"][0],
         results["distances"][0]
     )):
-        # Distance is 0-2 in cosine space; convert to a 0-100 relevance score
-        relevance = round((1 - dist / 2) * 100, 1)
+        relevance = round((1 - dist) * 100, 1)
         confidence = "HIGH" if relevance > 70 else "MEDIUM" if relevance > 50 else "LOW"
 
         lines.append(f"\n[{i+1}] {meta['cve_id']} | {meta['severity']} ({meta['score']}) | {meta['cwe']} | Relevance: {relevance}% [{confidence}]")
@@ -75,7 +59,7 @@ def query_intel(device_model: str, attack_signature: str, top_k: int = 10) -> st
 # ─── QUICK TEST ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"ChromaDB contains {collection.count()} CVE documents\n")
+    print(f"AES local index contains {collection.count()} CVE documents\n")
 
     # Simulate what happens when the Monitor Agent detects an attack on an ESP32
     result = query_intel(

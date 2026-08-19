@@ -8,20 +8,30 @@ import { mockDevices, mockState, stepMockDevices } from "./mock";
 // Turn it off + run the FastAPI backend to show only live, connected devices.
 export const DEMO = process.env.NEXT_PUBLIC_DEMO === "1";
 
+function authHeaders(): HeadersInit {
+  if (typeof window === "undefined") return {};
+  let token = window.sessionStorage.getItem("aesDashboardToken") ?? "";
+  if (!token && !DEMO) {
+    token = window.prompt("Enter the AES dashboard token") ?? "";
+    if (token) window.sessionStorage.setItem("aesDashboardToken", token);
+  }
+  return token ? { "X-AES-Admin-Token": token } : {};
+}
+
 async function getJSON<T>(url: string): Promise<T> {
-  const r = await fetch(url, { cache: "no-store" });
+  const r = await fetch(url, { cache: "no-store", headers: authHeaders() });
   if (!r.ok) throw new Error(`${url} → ${r.status}`);
   return (await r.json()) as T;
 }
 
 export const fetchDevices = () => getJSON<Device[]>("/api/devices");
 export const fetchState = () => getJSON<AesState>("/api/state");
-export const approveSkill = (id: string) => fetch(`/api/approve/${id}`, { method: "POST" });
-export const rejectSkill = (id: string) => fetch(`/api/reject/${id}`, { method: "POST" });
+export const approveSkill = (id: string) => fetch(`/api/approve/${encodeURIComponent(id)}`, { method: "POST", headers: authHeaders() });
+export const rejectSkill = (id: string) => fetch(`/api/reject/${encodeURIComponent(id)}`, { method: "POST", headers: authHeaders() });
 
-// ─── cam-01 attack demo (one click → attack + auto-patch; reset → normal) ──────
-export const runDemoAttack = () => fetch("/api/demo/cam01/attack", { method: "POST" });
-export const runDemoReset = () => fetch("/api/demo/cam01/reset", { method: "POST" });
+// ─── explicitly simulated cam-01 dashboard scenario ──────────────────────────
+export const runDemoAttack = () => fetch("/api/demo/cam01/attack", { method: "POST", headers: authHeaders() });
+export const runDemoReset = () => fetch("/api/demo/cam01/reset", { method: "POST", headers: authHeaders() });
 
 // ─── live fleet (device list + status), polled ────────────────────────────────
 export function useDevices(pollMs = 2000) {

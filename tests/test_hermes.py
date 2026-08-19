@@ -27,7 +27,7 @@ def _hermes(reply):
 
 
 def test_valid_action_passes_through():
-    h = _hermes(json.dumps({"action": "PATCH_OTA", "cve_id": "CVE-1", "confidence": 0.9}))
+    h = _hermes(json.dumps({"action": "PATCH_OTA", "cve_id": "CVE-2026-0001", "confidence": 0.9}))
     v = h.analyze_incident("esp32-cam-01", "spike", "ctx", 1)
     assert v.action == "PATCH_OTA" and v.confidence == 0.9
 
@@ -39,9 +39,21 @@ def test_unknown_action_coerced_to_held_investigate():
 
 
 def test_confidence_clamped_to_unit_interval():
-    h = _hermes(json.dumps({"action": "PATCH_OTA", "confidence": 5.0}))
+    h = _hermes(json.dumps({"action": "PATCH_OTA", "cve_id": "CVE-2026-0001", "confidence": 5.0}))
     v = h.analyze_incident("esp32-cam-01", "spike", "ctx", 1)
     assert v.confidence == 1.0
+
+
+def test_nonfinite_confidence_is_held():
+    h = _hermes(json.dumps({"action": "PATCH_OTA", "cve_id": "CVE-2026-0001", "confidence": float("nan")}))
+    v = h.analyze_incident("esp32-cam-01", "spike", "ctx", 1)
+    assert v.confidence == 0.0
+
+
+def test_action_must_match_trusted_solution_track():
+    h = _hermes(json.dumps({"action": "BLOCK_FIREWALL", "cve_id": "CVE-2026-0001", "confidence": 0.99}))
+    v = h.analyze_incident("esp32-cam-01", "spike", "ctx", 1)
+    assert v.action == "INVESTIGATE" and v.confidence == 0.0
 
 
 def test_unparseable_response_is_held():

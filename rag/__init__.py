@@ -2,12 +2,12 @@
 # Retrieval-Augmented Generation pipeline for the CVE knowledge base.
 #
 # Files:
-#   ingest_nvd.py     — Ingestion pipeline: NVD + Exploit-DB + ICS-CERT + Espressif → ChromaDB.
+#   ingest_nvd.py     — NVD + Exploit-DB metadata + CISA + Espressif → local index.
 #                        Run once to build the DB, then daily to refresh.
-#   query_chromadb.py — Intel Agent query layer. Called during every incident.
-#   vector_store.py   — (Milestone 2, Son) ChromaDB abstraction with typed metadata schema.
+#   query_chromadb.py — compatibility query CLI for the local SQLite vector index.
+#   vector_store.py   — embedded SQLite vectors + local Ollama embeddings.
 #   embedder.py       — (Milestone 2, Son) nomic-embed-text wrapper with retry logic.
 #   adapters/         — (Milestone 3, Son) Per-source ingestion adapters.
 #
-# ChromaDB data lives at ./aes_chromadb/ (gitignored, regenerate via ingest_nvd.py).
+# Vector data lives at ./data/aes_intel.sqlite3 (gitignored; regenerate via ingest_nvd.py).
 # Embedding model: nomic-embed-text via Ollama at localhost:11434.

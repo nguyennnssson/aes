@@ -10,11 +10,11 @@ git clone https://github.com/nguyennnssson/aes.git
 cd aes
 python3.12 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements.lock
 cp config/.env.example .env       # then fill in OPENAI_API_KEY (or use HERMES_BACKEND=codex)
 ```
 
-See the [README](README.md) for the full stack (Mosquitto, Ollama, ChromaDB) and
+See the [README](README.md) for the full stack (TLS Mosquitto, Ollama, the local vector index) and
 the model/backend configuration.
 
 ## Running the tests
@@ -38,7 +38,7 @@ CI runs both on every pull request (`.github/workflows/`).
 - **Match the surrounding style.** The codebase favors small, well-commented
   modules and explicit error handling over cleverness.
 - **Interfaces are stable.** The telemetry JSON schema, the
-  `handle_solution_1/2(incident, verdict) -> bool` contract, the unified-diff
+  `handle_solution_1/2(incident, verdict) -> resolved|pending|failed` contract, the unified-diff
   patch format, and the Gate 1/Gate 2 stdout markers are relied on across
   components — extend them additively (new optional fields), don't break them.
 - **Safety defaults stay safe.** Physical actions (firmware flash, firewall

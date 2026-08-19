@@ -13,7 +13,7 @@ export const DEVICE_REGISTRY: Record<
     owner: "Vy",
     firmware: "open",
     registry_status: "live",
-    notes: "Live device. Solution 1 — OTA patch pipeline.",
+    notes: "Live device. Signed firmware remediation requires strict gates and approval.",
   },
   "esp32-cam-02": {
     model: "ESP32-CAM",

@@ -13,6 +13,9 @@ const PENDING_GATES: GateResult[] = [
   { rule_id: "CWE-416", label: "use-after-free", passed: false },
   { rule_id: "CWE-78", label: "command injection", passed: false },
   { rule_id: "CWE-798", label: "hardcoded creds", passed: false },
+  { rule_id: "CWE-134", label: "format string", passed: false },
+  { rule_id: "CWE-690", label: "unchecked allocation", passed: false },
+  { rule_id: "KEY", label: "private key material", passed: false },
 ];
 
 interface Stage {
@@ -24,47 +27,58 @@ interface Stage {
 
 // Maps the real `incident.stage` values written by agents/response_agent.py to
 // a step index into sol1Stages/sol2Stages below, and which stages are terminal
-// failures vs. a normal (if hardware-less) completion.
+// failures vs. a verified completion.
 const SOL1_STEP: Record<string, number> = {
   vuln_confirmed: 0,
   patch_generated: 1,
   patch_failed: 1,
+  patch_policy_failed: 1,
   gate1_running: 2,
   gate1_failed: 2,
   gate1_passed: 3,
-  building: 3,
-  build_failed: 3,
-  no_hardware: 3,
-  flashing: 4,
-  flash_failed: 4,
-  validating: 5,
-  boot_timeout: 5,
+  gate2_running: 3,
+  gate2_failed: 3,
+  gate2_passed: 3,
+  awaiting_flash_approval: 4,
+  approved_for_install: 5,
+  signature_unverified: 5,
+  hardware_security_unverified: 5,
+  artifact_invalid: 5,
+  flashing: 5,
+  flash_failed: 5,
+  validating: 6,
+  boot_timeout: 6,
   boot_confirmed: 6,
 };
-const SOL1_FAILED = new Set(["patch_failed", "gate1_failed", "build_failed", "flash_failed", "boot_timeout"]);
+const SOL1_FAILED = new Set(["patch_failed", "patch_policy_failed", "gate1_failed", "gate2_failed", "artifact_invalid", "signature_unverified", "hardware_security_unverified", "flash_failed", "boot_timeout"]);
 // Terminal-but-not-failed stages: the pipeline stopped here on purpose and
 // nothing further will happen, so the active box must read as settled, not
 // "still running" — otherwise it looks stuck forever.
 const SOL1_DONE = new Set(["boot_confirmed"]);
-// OTA flash/self-validate/commit aren't wired up to real hardware yet — Gate 1
-// passing is treated as the full success path, with the remaining boxes shown
-// as simulated-complete rather than stuck pending forever.
-const SOL1_CAPPED = new Set(["no_hardware"]);
+// No intermediate stage is capped into a synthetic success. Only a real
+// authenticated boot proof completes Solution 1.
+const SOL1_CAPPED = new Set<string>();
 const SOL2_DONE = new Set(["verified"]);
 const SOL1_NOTE: Record<string, string> = {
   patch_failed: "Hermes diff could not be applied to the source",
+  patch_policy_failed: "patch attempted to alter protected firmware control-plane code",
   gate1_failed: "Gate 1 rejected the patch — held for manual review",
-  build_failed: "firmware build failed",
-  flash_failed: "OTA flash failed",
-  boot_timeout: "device didn't confirm boot — may have rolled back",
-  no_hardware: "patch live — incident resolved (OTA flash simulated; hardware not wired up yet)",
-  boot_confirmed: "patch live — incident resolved",
+  gate2_failed: "strict compile, reference-boot, or active replay evidence failed",
+  artifact_invalid: "validated artifact changed or disappeared",
+  signature_unverified: "firmware signature could not be verified",
+  hardware_security_unverified: "secure boot and flash encryption were not attested",
+  flash_failed: "signed serial installation failed",
+  boot_timeout: "device did not provide an authenticated fresh-boot proof",
+  awaiting_flash_approval: "validated artifact is held for explicit, hash-bound approval",
+  boot_confirmed: "signed firmware installed and authenticated boot confirmed",
 };
 
 const SOL2_STEP: Record<string, number> = {
   vuln_confirmed: 0,
   whitelist_built: 1,
+  identity_verified: 1,
   dry_run: 2,
+  awaiting_firewall_enforcement: 2,
   enforced: 3,
   verified: 4,
 };
@@ -84,10 +98,8 @@ function StepIcon({ state }: { state: "done" | "running" | "failed" | "pending" 
 
 // `settled` = the active box is a deliberate stopping point (success or
 // failure), not work-in-progress — so it must not render as "still running".
-// `capped` additionally marks every box AFTER the active one as done-but
-// -simulated (OTA flash/validate/commit aren't wired to real hardware yet,
-// so once Gate 1 passes the rest of the run is shown as a simulated success
-// instead of stuck "pending" forever).
+// `capped` is retained for compatibility with old demo records, but the live
+// pipeline never sets it.
 function Stepper({ stages, step, failed, settled, capped }: { stages: Stage[]; step: number; failed: boolean; settled: boolean; capped: boolean }) {
   return (
     <ol className="space-y-2.5">
@@ -168,14 +180,14 @@ export default function RemediationTheater({ device, incident }: { device: Devic
     { name: "Vulnerability confirmed", sub: incident?.cve_id ?? "CVE", log: `detected ${incident?.cve_id ?? "CVE"} — heap-overflow signature` },
     { name: "Patch generated", sub: "Hermes · unified diff", log: "Hermes generated a patch" },
     { name: "Gate 1 · Semgrep", sub: "static analysis", log: "running Semgrep CWE-119/416/78/798…" },
-    { name: "Gate 2 · Boot-diff", sub: "harness", sim: true, log: "soft-skipped (harness not wired yet)" },
-    { name: "OTA flash · ota_1", sub: "dual-partition", log: "flashing ota_1 …" },
-    { name: "Self-validate (30s)", sub: "WiFi + MQTT", log: "waiting for ota_1 boot confirmation…" },
-    { name: "Committed", sub: "patch live", log: "committed ota_1 — incident RESOLVED" },
+    { name: "Gate 2 · Active hardware replay", sub: "strict compile + reference device", log: "running strict reference-device attack replay…" },
+    { name: "Human approval", sub: "hash-bound manifest", log: "waiting for approval of exact source / patch / binary hashes" },
+    { name: "Signed firmware install", sub: "secure serial deployment", log: "verifying signature and hardware security state…" },
+    { name: "Authenticated boot proof", sub: "TLS MQTT + fresh boot id", log: "waiting for authenticated post-install telemetry…" },
   ];
   const sol2Stages: Stage[] = [
     { name: "Anomaly confirmed", sub: incident?.cve_id ?? "CVE", log: `detected ${incident?.cve_id ?? "CVE"} — closed firmware, cannot patch` },
-    { name: "Build 3-source whitelist", sub: "spec + baseline + CVE", log: "composed allow / deny rule set" },
+    { name: "Verify device identity", sub: "registry IP + MAC", log: "verified pinned IP/MAC at forwarding gateway" },
     { name: "Dry-run", sub: "no traffic impact", log: "dry-run: legitimate flows preserved" },
     { name: "Enforce at gateway", sub: "firewall", log: "wrote quarantine rule at gateway" },
     { name: "Verified", sub: "egress dropped", log: "malicious egress dropped — contained" },
@@ -205,7 +217,7 @@ export default function RemediationTheater({ device, incident }: { device: Devic
       <Card title="Remediation theater" accent="info">
         <EmptyState
           title="Held for manual review"
-          hint={`Hermes confidence ${Math.round((incident.verdict?.confidence ?? incident.confidence) * 100)}% was below the auto-execute threshold — no patch or firewall action was taken.`}
+          hint={`Hermes confidence ${Math.round((incident.verdict?.confidence ?? incident.confidence) * 100)}% was below the execution threshold — no patch or firewall action was taken.`}
           icon="⏸️"
         />
       </Card>
@@ -214,17 +226,14 @@ export default function RemediationTheater({ device, incident }: { device: Devic
 
   const verdict = incident.verdict;
   const patch = incident.patch;
-  const otaPct = capped ? 100 : Math.round((Math.min(step, stages.length - 1) / (stages.length - 1)) * 100);
+  const deploymentPct = capped ? 100 : Math.round((Math.min(step, stages.length - 1) / (stages.length - 1)) * 100);
 
   if (track === 2) {
-    const whitelist =
-      patch?.whitelist && patch.whitelist.length
-        ? patch.whitelist
-        : [
-            `allow  ${device.id} -> 192.168.1.1:443    cloud heartbeat (manufacturer spec)`,
-            `allow  ${device.id} -> 192.168.1.10:554   RTSP to NVR (fresh-flash baseline)`,
-            `deny   ${device.id} -> 0.0.0.0/0          default-deny everything else`,
-          ];
+    const quarantinePlan = [
+      `verify ${device.id} registry-pinned IPv4 + MAC at gateway`,
+      `drop   source traffic from ${device.id}`,
+      `drop   destination traffic to ${device.id}`,
+    ];
     return (
       <Card title="Remediation theater · Solution 2 (firewall)" accent="info">
         <div className="grid gap-5 md:grid-cols-2">
@@ -234,10 +243,10 @@ export default function RemediationTheater({ device, incident }: { device: Devic
           </div>
           <div className="space-y-4">
             <div>
-              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-2">3-source network whitelist</h4>
+              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-2">Gateway quarantine plan</h4>
               <pre className="overflow-x-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-xs leading-relaxed">
-                {whitelist.map((ln, i) => (
-                  <div key={i} className={ln.startsWith("allow") ? "text-clean" : ln.startsWith("deny") ? "text-attack" : "text-ink-2"}>
+                {quarantinePlan.map((ln, i) => (
+                  <div key={i} className={ln.startsWith("drop") ? "text-attack" : "text-ink-2"}>
                     {ln}
                   </div>
                 ))}
@@ -250,7 +259,7 @@ export default function RemediationTheater({ device, incident }: { device: Devic
                 <span className="font-mono text-[11px] text-ink-2">confidence {verdict?.confidence ?? incident.confidence}</span>
               </div>
               <div className="mt-2 text-[11px] text-ink-muted">
-                {step >= stages.length - 1 ? "egress dropped — device contained" : "building + enforcing quarantine…"}
+                {step >= stages.length - 1 ? "bidirectional rules verified — device contained" : "verifying identity / awaiting enforcement…"}
               </div>
             </Card>
           </div>
@@ -259,32 +268,32 @@ export default function RemediationTheater({ device, incident }: { device: Devic
     );
   }
 
-  // Solution 1 (OTA)
+  // Solution 1 (signed firmware remediation)
   const diff = patch?.diff || WAITING_DIFF;
   const gatesRun = !!(patch?.gates && patch.gates.length);
   const gates = gatesRun ? patch!.gates! : PENDING_GATES;
-  const part1 = capped ? "committed (simulated)" : step >= 6 ? "committed" : step >= 5 ? "validated" : step >= 4 ? "writing…" : "ready";
+  const part1 = step >= 6 ? "boot confirmed" : step >= 5 ? "installing" : step >= 4 ? "awaiting approval" : "not deployable";
 
   return (
-    <Card title="Patch theater · Solution 1 (OTA)" accent="clean">
+    <Card title="Patch theater · Solution 1 (signed firmware)" accent="clean">
       <div className="grid gap-5 md:grid-cols-2">
         <div className="space-y-4">
           <Stepper stages={stages} step={step} failed={failed} settled={settled} capped={capped} />
           <LiveConsole stages={stages} step={step} failed={failed} settled={settled} capped={capped} note={note} />
           <div>
             <div className="mb-1.5 flex items-center justify-between text-[11px] text-ink-2">
-              <span className="font-medium">OTA flash · dual-partition</span>
-              <span className="font-mono text-ink-muted">{otaPct}%</span>
+              <span className="font-medium">Signed firmware deployment</span>
+              <span className="font-mono text-ink-muted">{deploymentPct}%</span>
             </div>
             <div className="h-2 w-full overflow-hidden rounded-full bg-surface-2">
               <div
                 className="h-full rounded-full transition-all duration-700"
-                style={{ width: `${otaPct}%`, background: "linear-gradient(90deg,#0891B2,#2563EB)" }}
+                style={{ width: `${deploymentPct}%`, background: "linear-gradient(90deg,#0891B2,#2563EB)" }}
               />
             </div>
             <div className="mt-2 flex flex-wrap gap-2">
-              <Chip tone="data">ota_0 · running</Chip>
-              <Chip tone="info">ota_1 · {part1}</Chip>
+              <Chip tone="data">current firmware · running</Chip>
+              <Chip tone="info">candidate · {part1}</Chip>
             </div>
           </div>
         </div>
@@ -325,7 +334,7 @@ export default function RemediationTheater({ device, incident }: { device: Devic
               <span className="font-mono text-[11px] text-ink-2">confidence {verdict?.confidence ?? incident.confidence}</span>
             </div>
             <div className={cx("mt-2 text-[11px]", failed ? "text-attack" : "text-ink-muted")}>
-              {note ?? (gatesRun ? "Gate 1 PASS — flashing" : "awaiting patch + Gate 1…")}
+              {note ?? (gatesRun ? "Gate 1 complete — strict Gate 2 and approval still required" : "awaiting patch + Gate 1…")}
             </div>
           </Card>
         </div>

@@ -1,6 +1,11 @@
 rules:
   - id: esp32-cwe119-buffer-overflow
-    pattern: strcpy($DEST, $SRC)
+    pattern-either:
+      - pattern: strcpy($DEST, $SRC)
+      - pattern: strcat($DEST, $SRC)
+      - pattern: gets($DEST)
+      - pattern: sprintf($DEST, ...)
+      - pattern: vsprintf($DEST, ...)
     message: "CRITICAL: Detected unsafe 'strcpy' (CWE-119). Potential buffer overflow on ESP32 flash! Use 'strlcpy' or 'strncpy' instead."
     languages: [c]
     severity: ERROR
@@ -17,8 +22,41 @@ rules:
     severity: ERROR
 
   - id: esp32-cwe78-command-injection
-    pattern: system($CMD)
+    pattern-either:
+      - pattern: system($CMD)
+      - pattern: popen($CMD, ...)
     message: "CRITICAL: Detected unsafe 'system' call (CWE-78). Remote command injection risk on gateway interface!"
+    languages: [c]
+    severity: ERROR
+
+  - id: esp32-cwe134-nonliteral-format
+    patterns:
+      - pattern-either:
+          - pattern: printf($FORMAT, ...)
+          - pattern: ESP_LOGI($TAG, $FORMAT, ...)
+          - pattern: ESP_LOGW($TAG, $FORMAT, ...)
+          - pattern: ESP_LOGE($TAG, $FORMAT, ...)
+      - metavariable-regex:
+          metavariable: $FORMAT
+          regex: '^[A-Za-z_][A-Za-z0-9_]*$'
+    message: "Non-literal format string may permit memory disclosure or corruption (CWE-134)."
+    languages: [c]
+    severity: ERROR
+
+  - id: esp32-cwe190-unchecked-allocation
+    patterns:
+      - pattern: $PTR = malloc($SIZE);
+      - pattern-not-inside: |
+          $PTR = malloc($SIZE);
+          ...
+          if ($PTR == NULL) { ... }
+    message: "Heap allocation result is not checked before use."
+    languages: [c]
+    severity: WARNING
+
+  - id: esp32-private-key-material
+    pattern-regex: '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
+    message: "Private key material must never be embedded in firmware source."
     languages: [c]
     severity: ERROR
 
