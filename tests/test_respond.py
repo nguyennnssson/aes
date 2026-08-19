@@ -58,3 +58,15 @@ def test_track1_runs_handler_once(monkeypatch):
     verdict = {"solution_track": 1, "action": "PATCH_OTA", "confidence": 0.9}
     assert ra.respond(_incident(), verdict) is False
     assert called["n"] == 1
+
+
+def test_validated_patch_remains_pending_until_enforced(monkeypatch):
+    updates = []
+    monkeypatch.setattr(ra, "SOLUTION_HANDLERS", {1: lambda _i, _v: ra.OUTCOME_PENDING})
+    monkeypatch.setattr(ra, "update_incident_status", lambda *a, **k: updates.append((a, k)))
+    monkeypatch.setattr(ra, "update_incident_fields", lambda *a, **k: updates.append((a, k)))
+    monkeypatch.setattr(ra, "post_incident_alert", lambda *a, **k: None)
+    verdict = {"solution_track": 1, "action": "PATCH_OTA", "confidence": 0.9}
+    assert ra.respond(_incident(), verdict) is False
+    assert any(call[1].get("status") == "AWAITING_APPROVAL" for call in updates)
+    assert not any("RESOLVED" in call[0] for call in updates)

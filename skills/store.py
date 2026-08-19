@@ -21,12 +21,15 @@ Usage:
 """
 
 import json
+import os
+import threading
 from pathlib import Path
 from typing import Optional
 
 from skills.schema import Skill
 
 _DEFAULT_PATH = Path(__file__).parent.parent / "config" / "skills.jsonl"
+_STORE_LOCK = threading.Lock()
 
 
 class SkillStore:
@@ -39,8 +42,10 @@ class SkillStore:
 
     def save(self, skill: Skill) -> None:
         """Append skill to JSONL store. Preserves full history."""
-        with self.path.open("a") as f:
-            f.write(json.dumps(skill.to_dict()) + "\n")
+        with _STORE_LOCK, self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(skill.to_dict(), allow_nan=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     # ─── READ ────────────────────────────────────────────────────────────────
 
@@ -49,7 +54,7 @@ class SkillStore:
         if not self.path.exists():
             return []
         skills = []
-        with self.path.open() as f:
+        with _STORE_LOCK, self.path.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:

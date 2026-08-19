@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
@@ -14,6 +15,8 @@
 #include "esp_ota_ops.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "esp_random.h"
+#include "esp_netif_sntp.h"
 #include "freertos/idf_additions.h"
 #include "lwip/stats.h"
 
@@ -23,21 +26,28 @@ static const char *TAG = "AES_GATE2";
 // Set the WiFi password per build via `idf.py menuconfig` or sdkconfig.secrets —
 // it is never committed (CWE-798).
 #define DEVICE_ID       CONFIG_AES_DEVICE_ID
+#define FIRMWARE_VERSION CONFIG_AES_FIRMWARE_VERSION
 #define WIFI_SSID       CONFIG_AES_WIFI_SSID
 #define WIFI_PASS       CONFIG_AES_WIFI_PASSWORD
 #define MQTT_BROKER_URL CONFIG_AES_MQTT_BROKER_URI
+#define MQTT_USERNAME   CONFIG_AES_MQTT_USERNAME
+#define MQTT_PASSWORD   CONFIG_AES_MQTT_PASSWORD
+
+extern const uint8_t srv_cert_crt_start[] asm("_binary_srv_cert_crt_start");
+extern const uint8_t srv_cert_crt_end[]   asm("_binary_srv_cert_crt_end");
 
 static esp_mqtt_client_handle_t mqtt_client;
 static bool mqtt_connected = false;
 static bool watchdog_triggered = false;
+static uint32_t publish_acks = 0;
+static uint32_t telemetry_sequence = 0;
+static char boot_id[17];
+static char telemetry_topic[96];
 
 
 // [CRITICAL FUNCTION]: Mark security patch, disable memory auto-flipping mechanism.
 void validate_and_confirm_app(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
-    esp_app_desc_t app_desc;
-    esp_ota_get_partition_description(running, &app_desc);
-
     ESP_LOGI(TAG, "Analyzing Running Partition: %s", running->label);
 
     // Check whether this partition is in a pending challenge state.
@@ -58,6 +68,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Network Link Established.");
+        esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        esp_netif_sntp_init(&config);
     }
 }
 
@@ -66,10 +78,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT Connected.");
         mqtt_connected = true;
         
-        // Upon establishing both network and MQTT connections -> Immediately trigger the command to confirm the app is clean.
-        validate_and_confirm_app();
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
         mqtt_connected = false;
+    } else if (event_id == MQTT_EVENT_PUBLISHED) {
+        publish_acks++;
+        // A connection alone is not health proof. Confirm a pending OTA image
+        // only after three QoS1 telemetry messages have been acknowledged.
+        if (publish_acks == 3) {
+            validate_and_confirm_app();
+        }
     }
 }
 
@@ -219,16 +236,43 @@ void telemetry_task(void *pvParameters) {
         int   connection_count = mqtt_connected ? 1 : 0;
 
         cJSON *root = cJSON_CreateObject();
+        if (root == NULL) {
+            ESP_LOGE(TAG, "Unable to allocate telemetry object");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        time_t now;
+        struct tm utc;
+        char timestamp[32];
+        time(&now);
+        gmtime_r(&now, &utc);
+        if (utc.tm_year + 1900 < 2024) {
+            ESP_LOGW(TAG, "Telemetry held until authenticated time is synchronized");
+            cJSON_Delete(root);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
         cJSON_AddStringToObject(root, "device_id", DEVICE_ID);
+        cJSON_AddStringToObject(root, "timestamp", timestamp);
+        cJSON_AddStringToObject(root, "boot_id", boot_id);
+        cJSON_AddStringToObject(root, "firmware_version", FIRMWARE_VERSION);
+        cJSON_AddNumberToObject(root, "sequence", telemetry_sequence++);
         cJSON_AddNumberToObject(root, "cpu_percent", cpu_percent);
         cJSON_AddNumberToObject(root, "memory_percent", memory_percent);
         cJSON_AddNumberToObject(root, "packet_rate", packet_rate);
         cJSON_AddNumberToObject(root, "connection_count", connection_count);
 
         char *json_string = cJSON_PrintUnformatted(root);
+        if (json_string == NULL) {
+            ESP_LOGE(TAG, "Unable to allocate telemetry payload");
+            cJSON_Delete(root);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
 
         if (mqtt_connected) {
-            esp_mqtt_client_publish(mqtt_client, "aes/telemetry/" DEVICE_ID, json_string, 0, 1, 0);
+            esp_mqtt_client_publish(mqtt_client, telemetry_topic, json_string, 0, 1, 0);
             ESP_LOGI(TAG, "Telemetry stream: %s", json_string);
         } else {
             ESP_LOGW(TAG, "Telemetry hold, waiting network... %s", json_string);
@@ -242,6 +286,22 @@ void telemetry_task(void *pvParameters) {
 
 void app_main(void) {
     ESP_LOGI(TAG, "AES Firmware Booting...");
+
+    snprintf(boot_id, sizeof(boot_id), "%08lx%08lx",
+             (unsigned long)esp_random(), (unsigned long)esp_random());
+    int topic_length = snprintf(telemetry_topic, sizeof(telemetry_topic),
+                                "aes/telemetry/%s", DEVICE_ID);
+    if (topic_length < 0 || topic_length >= (int)sizeof(telemetry_topic)) {
+        ESP_LOGE(TAG, "Configured device identity is too long");
+        return;
+    }
+    ESP_LOGI(TAG, "Boot evidence id=%s firmware=%s", boot_id, FIRMWARE_VERSION);
+    if (strlen(WIFI_PASS) < 12 || strlen(MQTT_USERNAME) == 0 || strlen(MQTT_PASSWORD) < 16
+            || strcmp(MQTT_USERNAME, DEVICE_ID) != 0
+            || strncmp(MQTT_BROKER_URL, "mqtts://", 8) != 0) {
+        ESP_LOGE(TAG, "Secure WiFi/MQTT credentials are not provisioned; networking disabled");
+        return;
+    }
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -272,6 +332,9 @@ void app_main(void) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URL,
+        .broker.verification.certificate = (const char *)srv_cert_crt_start,
+        .credentials.username = MQTT_USERNAME,
+        .credentials.authentication.password = MQTT_PASSWORD,
     };
     
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);

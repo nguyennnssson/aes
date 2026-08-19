@@ -20,9 +20,8 @@ STAGES (each reports pass / fail / skipped):
      Skipped unless GATE2_REFERENCE_PORT is set (reference hardware attached).
 
 VERDICT:
-  passed = every stage that RAN passed.
-  --strict additionally fails the gate if any stage was skipped — use this on
-  demo day / production, where "we couldn't test it" must block the flash.
+  Strict is the default: every stage must run and pass. `--allow-skips` exists
+  only for local diagnostics and its result is never deployable.
 
 OUTPUT CONTRACT (same shape response_agent.py parses for Gate 1):
   human-readable log, then a marker line and JSON:
@@ -30,7 +29,7 @@ OUTPUT CONTRACT (same shape response_agent.py parses for Gate 1):
     {"passed": true, "stages": [{"name", "status", "detail"}, ...]}
 
 USAGE:
-  python gate2.py <patched_source.c> [--strict]
+  python gate2.py <patched_source.c> [--allow-skips]
 
 ENV:
   GATE2_REFERENCE_PORT — serial port of the reference ESP32 (e.g. COM7,
@@ -48,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import hashlib
 import time
 from pathlib import Path
 
@@ -63,10 +63,10 @@ _INCIDENTS    = _REPO_ROOT / "aes_incidents.jsonl"
 PASS, FAIL, SKIPPED = "pass", "fail", "skipped"
 
 
-def _stage(name: str, status: str, detail: str) -> dict:
+def _stage(name: str, status: str, detail: str, **evidence) -> dict:
     icon = {"pass": "✅", "fail": "❌", "skipped": "⏭"}[status]
     print(f"[GATE 2] {icon} {name}: {detail}")
-    return {"name": name, "status": status, "detail": detail}
+    return {"name": name, "status": status, "detail": detail, **evidence}
 
 
 # ─── STAGE 1: STRUCTURE ──────────────────────────────────────────────────────
@@ -86,9 +86,11 @@ def check_structure(src_path: Path) -> dict:
     if re.search(r"^@@ ", text, re.MULTILINE):
         return _stage("structure", FAIL, "raw diff hunk header '@@' left in source")
 
-    # Brace/paren balance on comment- and string-stripped text.
-    stripped = re.sub(r'//[^\n]*|/\*.*?\*/', '', text, flags=re.DOTALL)
-    stripped = re.sub(r'"(\\.|[^"\\])*"|\'(\\.|[^\'\\])*\'', '""', stripped)
+    # Brace/paren balance on string- and comment-stripped text. Strings must be
+    # removed first so URL literals such as "mqtts://..." are not mistaken for
+    # comments and allowed to hide the remainder of the function.
+    stripped = re.sub(r'"(\\.|[^"\\])*"|\'(\\.|[^\'\\])*\'', '""', text)
+    stripped = re.sub(r'//[^\n]*|/\*.*?\*/', '', stripped, flags=re.DOTALL)
     for open_c, close_c in (("{", "}"), ("(", ")")):
         if stripped.count(open_c) != stripped.count(close_c):
             return _stage("structure", FAIL,
@@ -133,16 +135,46 @@ def check_compile(src_path: Path) -> dict:
             tail = (build.stderr or build.stdout)[-400:].replace("\n", " | ")
             return _stage("compile", FAIL, f"build failed: {tail}")
 
-        bins = list((staged / "build").glob("*.bin"))
-        if not bins:
+        build_dir = staged / "build"
+        named = build_dir / "aes_esp32_cam.bin"
+        bins = list(build_dir.glob("*.bin"))
+        if named.exists():
+            app_bin = named
+        elif bins:
+            app_bin = max(bins, key=lambda path: path.stat().st_size)
+        else:
             return _stage("compile", FAIL, "build reported success but produced no .bin")
 
-        # Keep the verified binary for the boot-diff stage / manual flash.
-        out_dir = _REPO_ROOT / "outputs" / "gate2"
+        # Keep the artifact in an incident-specific directory. A global
+        # verified_firmware.bin allowed a later incident to reuse an unrelated
+        # build. The source and binary hashes travel with the gate evidence.
+        configured = os.getenv("GATE2_ARTIFACT_DIR", "outputs/gate2/diagnostic")
+        out_dir = Path(configured)
+        if not out_dir.is_absolute():
+            out_dir = _REPO_ROOT / out_dir
+        out_dir = out_dir.resolve()
+        gate_root = (_REPO_ROOT / "outputs" / "gate2").resolve()
+        if not out_dir.is_relative_to(gate_root):
+            return _stage("compile", FAIL, "artifact directory must stay under outputs/gate2")
         out_dir.mkdir(parents=True, exist_ok=True)
-        verified = out_dir / "verified_firmware.bin"
-        shutil.copy2(bins[0], verified)
-        return _stage("compile", PASS, f"clean build → {verified}")
+        verified = out_dir / "firmware.bin"
+        shutil.copy2(app_bin, verified)
+        source_hash = hashlib.sha256(src_path.read_bytes()).hexdigest()
+        binary_hash = hashlib.sha256(verified.read_bytes()).hexdigest()
+        try:
+            sdkconfig = (staged / "sdkconfig").read_text(encoding="utf-8")
+            version_match = re.search(r'^CONFIG_AES_FIRMWARE_VERSION="([^"\r\n]{1,64})"$', sdkconfig, re.MULTILINE)
+            firmware_version = version_match.group(1) if version_match else ""
+        except OSError:
+            firmware_version = ""
+        if not firmware_version:
+            verified.unlink(missing_ok=True)
+            return _stage("compile", FAIL, "compiled configuration did not contain a firmware version")
+        return _stage(
+            "compile", PASS, f"clean build → {verified}",
+            artifact_path=str(verified), source_sha256=source_hash,
+            binary_sha256=binary_hash, firmware_version=firmware_version,
+        )
 
 
 # ─── STAGE 3: BOOT-DIFF ──────────────────────────────────────────────────────
@@ -160,7 +192,12 @@ def check_boot_diff(compile_result: dict) -> dict:
     if compile_result["status"] != PASS:
         return _stage("boot-diff", SKIPPED, "no verified build to flash (compile stage did not pass)")
 
-    firmware = _REPO_ROOT / "outputs" / "gate2" / "verified_firmware.bin"
+    firmware_path = compile_result.get("artifact_path")
+    if not firmware_path:
+        return _stage("boot-diff", FAIL, "compile evidence did not identify an artifact")
+    firmware = Path(firmware_path)
+    if not firmware.exists() or hashlib.sha256(firmware.read_bytes()).hexdigest() != compile_result.get("binary_sha256"):
+        return _stage("boot-diff", FAIL, "compiled artifact is missing or its hash changed")
     esptool = shutil.which("esptool.py") or shutil.which("esptool")
     if not esptool:
         return _stage("boot-diff", SKIPPED, "esptool not installed (pip install esptool)")
@@ -180,47 +217,101 @@ def check_boot_diff(compile_result: dict) -> dict:
     # Boot proof: the reference device must publish telemetry within 35s
     # (mirrors the on-device 30s validate-or-rollback window in main.c).
     sys.path.insert(0, str(_REPO_ROOT))
-    from agents.mqtt_compat import make_mqtt_client
-    from agents.monitor_agent import MonitorAgent, evaluate_detection, load_active_params
+    from agents.mqtt_compat import configure_mqtt_client, make_mqtt_client
+    from agents.monitor_agent import MonitorAgent, Telemetry, evaluate_detection, load_active_params
     import threading
 
-    # Only the reference device's fresh telemetry counts as boot proof (REVIEW
-    # P1-9): subscribing to the wildcard let any publisher (e.g. the simulator)
-    # fake a boot. GATE2_REFERENCE_DEVICE names the flashed device; unset falls
-    # back to the wildcard for backward-compatible single-device benches.
     ref_device = os.getenv("GATE2_REFERENCE_DEVICE")
+    if not ref_device:
+        return _stage("boot-diff", FAIL, "GATE2_REFERENCE_DEVICE is required; wildcard boot proof is forbidden")
+    attack_harness = os.getenv("GATE2_ATTACK_HARNESS")
+    if not attack_harness:
+        return _stage("boot-diff", FAIL, "GATE2_ATTACK_HARNESS is required for an active hardware test")
+    harness_path = Path(attack_harness).resolve()
+    if not harness_path.is_file():
+        return _stage("boot-diff", FAIL, f"attack harness not found: {harness_path}")
+
     booted   = threading.Event()
     readings = []
+    boot_id = None
 
     def _on_msg(client, _u, msg):
         try:
             data = json.loads(msg.payload.decode())
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return
-        if ref_device and data.get("device_id") != ref_device:
+        if data.get("device_id") != ref_device:
+            return
+        current_boot = data.get("boot_id")
+        if not isinstance(current_boot, str) or len(current_boot) < 8:
+            return
+        if data.get("firmware_version") != compile_result.get("firmware_version"):
+            return
+        if type(data.get("sequence")) is not int or not (0 <= data["sequence"] <= 1_000_000):
+            return
+        try:
+            telemetry = Telemetry(
+                device_id=data["device_id"], timestamp=data["timestamp"],
+                cpu_percent=float(data["cpu_percent"]),
+                memory_percent=float(data["memory_percent"]),
+                packet_rate=float(data["packet_rate"]),
+                connection_count=int(data["connection_count"]),
+            )
+            if telemetry.validate():
+                return
+        except (KeyError, TypeError, ValueError, OverflowError):
             return
         readings.append(data)
         booted.set()
 
     client = make_mqtt_client("aes-gate2-harness")
+    configure_mqtt_client(client, role="monitor")
     client.on_message = _on_msg
     try:
         client.connect(os.getenv("MQTT_HOST", "localhost"),
-                       int(os.getenv("MQTT_PORT", "1883")), keepalive=10)
-        client.subscribe(f"aes/telemetry/{ref_device}" if ref_device else "aes/telemetry/+")
+                       int(os.getenv("MQTT_PORT", "8883")), keepalive=10)
+        client.subscribe(f"aes/telemetry/{ref_device}", qos=1)
         client.loop_start()
         boot_ok = booted.wait(timeout=35)
     except Exception as e:
         return _stage("boot-diff", FAIL, f"MQTT boot verification error: {e}")
+
+    if not boot_ok:
+        try:
+            client.loop_stop(); client.disconnect()
+        except Exception:
+            pass
+        return _stage("boot-diff", FAIL,
+                      "no telemetry within 35s — device likely rolled back the patch")
+
+    boot_id = readings[-1]["boot_id"]
+    before_attack = len(readings)
+    try:
+        harness_command = ([sys.executable, str(harness_path)] if harness_path.suffix.lower() == ".py"
+                           else [str(harness_path)])
+        harness = subprocess.run(
+            harness_command + ["--device", ref_device, "--port", port],
+            capture_output=True, text=True, timeout=120,
+        )
+        if harness.returncode != 0:
+            return _stage("boot-diff", FAIL, f"attack harness failed: {(harness.stderr or harness.stdout)[-300:]}")
+        deadline = time.monotonic() + 20
+        minimum = max(3, int(os.getenv("GATE2_MIN_ATTACK_READINGS", "3")))
+        while time.monotonic() < deadline and len(readings) - before_attack < minimum:
+            time.sleep(0.2)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        return _stage("boot-diff", FAIL, f"attack harness could not run: {exc}")
     finally:
         try:
             client.loop_stop(); client.disconnect()
         except Exception:
             pass
 
-    if not boot_ok:
-        return _stage("boot-diff", FAIL,
-                      "no telemetry within 35s — device likely rolled back the patch")
+    attack_readings = readings[before_attack:]
+    if len(attack_readings) < minimum:
+        return _stage("boot-diff", FAIL, f"only {len(attack_readings)} authenticated readings arrived during active replay")
+    if any(reading.get("boot_id") != boot_id for reading in attack_readings):
+        return _stage("boot-diff", FAIL, "reference device rebooted during the active attack test")
 
     # Attack replay: run the logged attack deviations back through the LIVE
     # detection params. The patch is proven when the reference device, running
@@ -228,20 +319,29 @@ def check_boot_diff(compile_result: dict) -> dict:
     # signature must still be recognisable (detector sane) while the fresh
     # reference readings stay clean.
     replay_path = Path(os.getenv("GATE2_ATTACK_REPLAY", _INCIDENTS))
+    from skills.trusted_labels import verify_ground_truth
+
     attacks = []
     if replay_path.exists():
         for line in replay_path.read_text().splitlines():
             try:
-                attacks.append(json.loads(line))
+                candidate = json.loads(line)
+                if verify_ground_truth(candidate, "ATTACK"):
+                    attacks.append(candidate)
             except json.JSONDecodeError:
                 pass
     if not attacks:
-        return _stage("boot-diff", FAIL, f"no recorded attack traffic to replay ({replay_path})")
+        return _stage("boot-diff", FAIL, f"no authenticated attack traffic to replay ({replay_path})")
 
     params = load_active_params()
     still_detected = sum(
         1 for a in attacks if evaluate_detection(a.get("deviations", {}), params)[0]
     )
+    if still_detected / len(attacks) < 0.80:
+        return _stage(
+            "boot-diff", FAIL,
+            f"detector regression recognized only {still_detected}/{len(attacks)} historical attacks",
+        )
 
     # Fresh boot readings from the PATCHED firmware must look clean: compute
     # their real deviations against the stored per-device EWMA baseline and run
@@ -264,21 +364,23 @@ def check_boot_diff(compile_result: dict) -> dict:
         return out
 
     fresh_flagged = sum(
-        1 for r in readings if evaluate_detection(_deviations(r), params)[0]
+        1 for r in attack_readings if evaluate_detection(_deviations(r), params)[0]
     )
 
     if fresh_flagged:
-        return _stage("boot-diff", FAIL, "patched firmware's clean boot telemetry still flags as attack")
+        return _stage("boot-diff", FAIL, "authenticated reference telemetry became anomalous during active attack replay")
     return _stage(
         "boot-diff", PASS,
-        f"booted in <35s, {still_detected}/{len(attacks)} recorded attacks still recognised "
-        f"by the detector, fresh telemetry clean",
+        f"authenticated boot {boot_id} survived active replay; {len(attack_readings)} readings remained clean; "
+        f"detector regression recognized {still_detected}/{len(attacks)} historical attacks",
+        boot_id=boot_id, attack_readings=len(attack_readings),
+        historical_detected=still_detected, historical_total=len(attacks),
     )
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
-def run_gate2(src: Path, strict: bool = False) -> dict:
+def run_gate2(src: Path, strict: bool = True) -> dict:
     print(f"[GATE 2] Compile-Boot-Diff harness on: {src}")
     stages = [check_structure(src)]
     if stages[0]["status"] == PASS:
@@ -304,11 +406,11 @@ def run_gate2(src: Path, strict: bool = False) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="AES Gate 2 — Compile-Boot-Diff harness")
     parser.add_argument("source", help="patched C source file to validate")
-    parser.add_argument("--strict", action="store_true",
-                        help="fail the gate if any stage had to be skipped (production mode)")
+    parser.add_argument("--allow-skips", action="store_true",
+                        help="diagnostics only: permit skipped stages; result is not deployable")
     args = parser.parse_args()
 
-    result = run_gate2(Path(args.source), strict=args.strict)
+    result = run_gate2(Path(args.source), strict=not args.allow_skips)
     print("\n--- GATE 2 OUTPUT RESULT ---")
     print(json.dumps(result, indent=4))
     sys.exit(0 if result["passed"] else 1)

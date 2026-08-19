@@ -2,8 +2,12 @@
 # AES — Full test suite
 # Usage: bash test_all.sh
 
-cd ~/aes
-source venv/bin/activate
+set -uo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+if [[ -f venv/bin/activate ]]; then
+    source venv/bin/activate
+fi
 
 echo ""
 echo "========================================"
@@ -15,24 +19,24 @@ FAIL=0
 
 check() {
     local label=$1
-    local cmd=$2
-    if eval "$cmd" &>/dev/null; then
+    shift
+    if "$@" &>/dev/null; then
         echo "  ✅  $label"
         ((PASS++))
     else
         echo "  ❌  $label"
-        eval "$cmd" 2>&1 | sed 's/^/      /'
+        "$@" 2>&1 | sed 's/^/      /'
         ((FAIL++))
     fi
 }
 
 echo ""
 echo "── Imports ──────────────────────────────"
-check "agents.monitor_agent"      "python3 -c 'from agents.monitor_agent import MonitorAgent'"
-check "agents.monitor_agent_mqtt" "python3 -c 'from agents.monitor_agent_mqtt import *'"
-check "agents.response_agent"     "python3 -c 'from agents.response_agent import respond'"
-check "discord.discord_alerts"    "python3 -c 'from discord.discord_alerts import post_incident_alert'"
-check "rag.query_chromadb"        "python3 -c 'from rag.query_chromadb import query_intel'"
+check "agents.monitor_agent"      python3 -c 'from agents.monitor_agent import MonitorAgent'
+check "agents.monitor_agent_mqtt" python3 -c 'from agents.monitor_agent_mqtt import *'
+check "agents.response_agent"     python3 -c 'from agents.response_agent import respond'
+check "discord.discord_alerts"    python3 -c 'from discord.discord_alerts import post_incident_alert'
+check "local Intel query"         python3 -c 'from rag.query_chromadb import query_intel'
 
 echo ""
 echo "── Diagnostic ───────────────────────────"

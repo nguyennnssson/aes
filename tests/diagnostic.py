@@ -1,5 +1,9 @@
-"""AES — Mac Studio Diagnostic"""
+"""AES environment diagnostic (Windows, Linux, or macOS)."""
 import sys, os, shutil, subprocess
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 print("\n=== AES Mac Studio Diagnostic ===")
 print(f"  Python                    {sys.version.split()[0]}")
@@ -11,10 +15,9 @@ print(f"  codex CLI                 {shutil.which('codex') or 'NOT FOUND'}")
 # ── Package checks (correct imports) ─────────────────────────────────────────
 packages = {
     "paho-mqtt":  "paho.mqtt.client",
-    "chromadb":   "chromadb",
     "openai":     "openai",
     "requests":   "requests",
-    "ollama":     "ollama",
+    "fastapi":    "fastapi",
 }
 for name, module in packages.items():
     try:
@@ -38,22 +41,17 @@ try:
 except Exception:
     print("  Mosquitto running         unknown")
 
-# ── ChromaDB document count ───────────────────────────────────────────────────
+# ── Local Intel index document count ──────────────────────────────────────────
 try:
-    import chromadb
-    from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
-    nomic_ef = OllamaEmbeddingFunction(
-        model_name="nomic-embed-text",
-        url="http://localhost:11434/api/embeddings"
-    )
-    client = chromadb.PersistentClient(path="./aes_chromadb")
-    col = client.get_or_create_collection(
-        "cve_knowledge_base",
-        embedding_function=nomic_ef,
-        metadata={"hnsw:space": "cosine"}
-    )
-    print(f"  ChromaDB documents        {col.count()}")
+    from rag.vector_store import get_collection
+    print(f"  Intel index documents     {get_collection().count()}")
 except Exception as e:
-    print(f"  ChromaDB documents        ERROR: {e}")
+    print(f"  Intel index documents     ERROR: {e}")
+
+secure_mqtt = bool(os.getenv("MQTT_CA_CERT") and
+                   (os.getenv("MQTT_MONITOR_USERNAME") or os.getenv("MQTT_USERNAME")))
+print(f"  Secure MQTT config        {'SET' if secure_mqtt else 'NOT SET'}")
+print(f"  Dashboard token           {'SET' if os.getenv('AES_DASHBOARD_TOKEN') else 'NOT SET'}")
+print(f"  Audit HMAC key            {'SET' if os.getenv('AES_AUDIT_HMAC_KEY') else 'NOT SET'}")
 
 print("==================================\n")

@@ -32,11 +32,13 @@ const STAGE_ACTIVE_NODE: Record<string, number> = {
   flash_failed: 5,
   validating: 5,
   boot_timeout: 5,
+  awaiting_flash_approval: 5,
+  approved_for_install: 5,
   whitelist_built: 5,
   dry_run: 5,
+  awaiting_firewall_enforcement: 5,
   enforced: 5,
   // execution finished → the only thing left is the Discord alert
-  no_hardware: 6,
   boot_confirmed: 6,
   verified: 6,
 };
@@ -47,7 +49,7 @@ const STAGE_ACTIVE_NODE: Record<string, number> = {
 // them. On a terminal status every node (including the Discord alert) reads as done.
 function buildStages(incident: Incident): Stage[] {
   const stage = incident.stage;
-  const terminal = incident.status !== "OPEN";
+  const terminal = incident.status === "RESOLVED";
   // Where the signal is on the bus right now. Before any stage write, the monitor
   // has only just logged it, so Intel (2) is the first thing spinning up.
   const active = stage && stage in STAGE_ACTIVE_NODE ? STAGE_ACTIVE_NODE[stage] : 2;

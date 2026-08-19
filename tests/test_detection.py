@@ -91,6 +91,13 @@ def test_invalid_telemetry_rejected(agent):
     assert "INVALID" in r.reason
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_telemetry_rejected(agent, value):
+    r = agent.check(_t(20, 40, value, 3))
+    assert not r.is_anomaly
+    assert "INVALID" in r.reason
+
+
 def test_empty_device_id_rejected():
     errs = _t(20, 40, 50, 3, device="").validate()
     assert any("device_id" in e for e in errs)
@@ -111,6 +118,8 @@ def test_validate_detection_params_clamps_and_drops_junk():
         "simultaneous_threshold": 99,       # above cap → clamps to 4
         "bogus": "ignored",
         "junk_number": "not-a-float",
+        "deviation_threshold_nan": float("nan"),
     })
     assert out == {"deviation_threshold": 0.30, "simultaneous_threshold": 4}
     assert validate_detection_params("not a dict") == {}
+    assert validate_detection_params({"deviation_threshold": float("nan")}) == {}

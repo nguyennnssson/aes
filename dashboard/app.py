@@ -3,9 +3,8 @@ AES — Local Dashboard (FastAPI)
 Owner: Son Nguyen (AI Infra)
 
 A deployable web app that runs on the SAME host as the pipeline (the Mac). It
-reads the artifacts the pipeline already writes and exposes the one write action
-that matters — approving/rejecting a Hermes learning skill — so you never copy a
-CLI command again.
+reads the artifacts the pipeline already writes and exposes authenticated
+learning-skill and demo-control actions for local operators.
 
 Run (from the repo root, with the venv active):
     pip install fastapi "uvicorn[standard]"
@@ -18,22 +17,26 @@ Endpoints:
     POST /api/approve/{id}     → approve a PENDING_HITL skill and inject it live
     POST /api/reject/{id}      → reject a PENDING_HITL skill
 
-Approve/reject go through skills.store + skills.inject directly (no Hermes/Chroma
-import), so the dashboard stays lightweight and can't be taken down by the heavy
-RAG stack.
+Approve/reject go through skills.store + skills.inject directly (no reasoning or
+retrieval import), so the dashboard stays lightweight.
 """
 
 import json
+import math
+import os
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from skills.store import SkillStore
 from skills.inject import Injector
+from skills.sandbox import Sandbox
 from skills.schema import PENDING_HITL
 
 # Optional Discord deploy notice — never let its absence break the dashboard.
@@ -58,22 +61,70 @@ STALE_AFTER_SECONDS = 15
 
 app   = FastAPI(title="AES Dashboard")
 
+ALLOWED_ORIGINS = {
+    origin.strip() for origin in os.getenv(
+        "AES_DASHBOARD_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+    ).split(",") if origin.strip()
+}
+ALLOWED_HOSTS = [
+    host.strip() for host in os.getenv("AES_DASHBOARD_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    if host.strip()
+]
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
 # Let the Next.js web app (web/, dev on :3000) call this API directly during dev.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=sorted(ALLOWED_ORIGINS),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type", "X-AES-Admin-Token"],
 )
 
 store = SkillStore()
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _require_admin(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_aes_admin_token: str | None = Header(default=None),
+):
+    expected = os.getenv("AES_DASHBOARD_TOKEN", "")
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="AES_DASHBOARD_TOKEN must contain at least 32 characters")
+    origin = request.headers.get("origin")
+    if origin and origin not in ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="origin is not allowed")
+    supplied = x_aes_admin_token or ""
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="invalid dashboard token")
 
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def _read_json(path: Path, default):
     try:
-        return json.loads(path.read_text())
+        return json.loads(
+            path.read_text(),
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+        )
     except Exception:
         return default
 
@@ -99,8 +150,10 @@ def _read_incidents(limit: int = 20) -> list:
         line = line.strip()
         if line:
             try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
+                rows.append(json.loads(
+                    line, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value))
+                ))
+            except (json.JSONDecodeError, ValueError):
                 pass
     return list(reversed(rows))[:limit]   # newest first
 
@@ -127,7 +180,7 @@ def _threshold_history() -> list:
 # ─── API ──────────────────────────────────────────────────────────────────────
 
 @app.get("/api/state")
-def state():
+def state(_admin=Depends(_require_admin)):
     return {
         "fleet":         _read_json(FLEET, {}),
         "incidents":     _read_incidents(),
@@ -166,8 +219,21 @@ def _default_baseline(model: str) -> dict:
     return {"cpu_percent": 21.0, "memory_percent": 38.0, "packet_rate": 47.0, "connection_count": 1}
 
 
+def _finite_float(value, default=0.0) -> float:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _bounded_int(value, default=0) -> int:
+    number = _finite_float(value, float(default))
+    return max(0, min(1_000_000, int(number)))
+
+
 @app.get("/api/devices")
-def devices():
+def devices(_admin=Depends(_require_admin)):
     """Every device ever seen in fleet_status.json, enriched with registry metadata.
     A device whose last update is older than STALE_AFTER_SECONDS (publisher killed,
     e.g. telemetry_sim.py stopped) is marked offline rather than dropped, so the web
@@ -190,10 +256,10 @@ def devices():
             "connected": not stale,
             "status": "offline" if stale else _norm_status(fs.get("status")),
             "metrics": {
-                "cpu_percent": float(fs.get("cpu_percent", 0) or 0),
-                "memory_percent": float(fs.get("memory_percent", 0) or 0),
-                "packet_rate": float(fs.get("packet_rate", 0) or 0),
-                "connection_count": int(fs.get("connection_count", 0) or 0),
+                "cpu_percent": _finite_float(fs.get("cpu_percent")),
+                "memory_percent": _finite_float(fs.get("memory_percent")),
+                "packet_rate": _finite_float(fs.get("packet_rate")),
+                "connection_count": _bounded_int(fs.get("connection_count")),
             },
             "baseline": _default_baseline(model),
             "last_seen": fs.get("last_seen", ""),
@@ -202,11 +268,16 @@ def devices():
 
 
 @app.post("/api/approve/{skill_id}")
-def approve(skill_id: str):
+def approve(skill_id: str, _admin=Depends(_require_admin)):
     skill = store.load_latest(skill_id)
     if not skill or skill.status != PENDING_HITL:
         return JSONResponse({"ok": False, "reason": "not pending"}, status_code=400)
-    skill.approve("dashboard")
+    if not Sandbox().benchmark(skill).passed():
+        return JSONResponse({"ok": False, "reason": "current authenticated benchmark failed"}, status_code=400)
+    try:
+        skill.approve("dashboard")
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "reason": str(exc)}, status_code=503)
     store.save(skill)
     ok = Injector(store).inject(skill)   # writes config/active_detection.json → monitor adopts live
     if ok and _discord_post:
@@ -222,7 +293,7 @@ def approve(skill_id: str):
 
 
 @app.post("/api/reject/{skill_id}")
-def reject(skill_id: str):
+def reject(skill_id: str, _admin=Depends(_require_admin)):
     skill = store.load_latest(skill_id)
     if not skill or skill.status != PENDING_HITL:
         return JSONResponse({"ok": False, "reason": "not pending"}, status_code=400)
@@ -232,27 +303,26 @@ def reject(skill_id: str):
 
 
 # ─── DEMO CONTROL (esp32-cam-01 attack→patch→reset, driven by live_demo.py) ─────
-# The cam-01 device screen drives a one-click attack→auto-fix story. These endpoints
-# only flip a tiny control file; scripts/live_demo.py reads it each tick and walks
-# esp32-cam-01 through the same fleet_status.json + incident artifacts the real
-# pipeline writes, so the existing theaters animate with no special-casing.
+# The cam-01 device screen can drive an explicitly simulated attack story. These
+# endpoints only flip a small control file consumed by scripts/live_demo.py; they
+# do not execute or claim a real remediation.
 
 @app.post("/api/demo/cam01/attack")
-def demo_attack():
-    """Inject the attack: cam-01 spikes, the pipeline detects + patches, then resolves."""
+def demo_attack(_admin=Depends(_require_admin)):
+    """Start the simulated cam-01 dashboard scenario."""
     DEMO_CTL.write_text(json.dumps({"phase": "attack", "t0": time.time()}))
     return {"ok": True, "phase": "attack"}
 
 
 @app.post("/api/demo/cam01/reset")
-def demo_reset():
+def demo_reset(_admin=Depends(_require_admin)):
     """Reset: cam-01 (and its incident) return to the clean baseline."""
     DEMO_CTL.write_text(json.dumps({"phase": "normal"}))
     return {"ok": True, "phase": "normal"}
 
 
 @app.get("/api/demo/cam01")
-def demo_status():
+def demo_status(_admin=Depends(_require_admin)):
     return _read_json(DEMO_CTL, {"phase": "normal"})
 
 

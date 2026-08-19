@@ -1,7 +1,7 @@
 """
-Unit tests for the Solution 1 flash gate + staged build (REVIEW P0-1, P0-3).
-Verifies the patched text (not the original main.c) is what would be built, and
-that flashing is held behind AES_FLASH_ENFORCE.
+Unit tests for the Solution 1 manifest-bound flash gate (REVIEW P0-1, P0-3).
+Verifies insecure global build reuse is gone and flashing is held behind
+AES_FLASH_ENFORCE.
 Run: pytest tests/test_solution1_build.py
 """
 import agents.response_agent as ra
@@ -13,16 +13,10 @@ def test_select_firmware_source_prefers_main_by_default(monkeypatch):
     assert src is not None and src.name == "main.c"
 
 
-def test_staged_build_reuses_gate2_binary(tmp_path, monkeypatch):
-    # When Gate 2 already produced verified_firmware.bin from the same patched
-    # source, _staged_firmware_build must reuse it rather than rebuild.
-    verified = tmp_path / "verified_firmware.bin"
-    verified.write_bytes(b"FIRMWARE")
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "outputs" / "gate2").mkdir(parents=True)
-    (tmp_path / "outputs" / "gate2" / "verified_firmware.bin").write_bytes(b"FW")
-    out = ra._staged_firmware_build("int main(){}")
-    assert out is not None and out.name == "verified_firmware.bin"
+def test_global_verified_binary_reuse_is_removed():
+    # Every incident must use the hash-bound artifact emitted by its own Gate 2
+    # run. A shared verified_firmware.bin is a cross-incident substitution risk.
+    assert not hasattr(ra, "_staged_firmware_build")
 
 
 def test_flash_held_without_enforce(monkeypatch):

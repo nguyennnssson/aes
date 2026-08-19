@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import types
+from datetime import datetime, timezone
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Run-from-scripts/ safety: put the repo root on sys.path so `import agents...`
@@ -84,7 +85,7 @@ def test_broker_connect():
         c.loop_stop()
         c.disconnect()
         if ok and rc_box[0] == 0:
-            record("broker accepts anonymous connections on localhost:1883", True)
+            record("explicit development broker is reachable on localhost:1883", True)
             return True
         else:
             record(
@@ -123,6 +124,7 @@ def test_receiver_logic():
     fake_msg.topic = f"aes/telemetry/{DEVICE_ID}"
     payload = {
         "device_id": DEVICE_ID,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "cpu_percent": 15.0,
         "memory_percent": 38.5,
         "packet_rate": 0.0,
@@ -217,6 +219,7 @@ def test_mqtt_roundtrip(broker_ok):
         payload = json.dumps(
             {
                 "device_id": DEVICE_ID,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "cpu_percent": round(15.0 + i * 0.5, 1),
                 "memory_percent": round(38.5 + i * 0.3, 2),
                 "packet_rate": 0.0,

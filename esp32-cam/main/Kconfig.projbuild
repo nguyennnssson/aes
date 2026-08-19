@@ -7,6 +7,13 @@ menu "AES Firmware Configuration"
             Must match an entry in config/device_registry.json.
             Telemetry publishes to aes/telemetry/<AES_DEVICE_ID>.
 
+    config AES_FIRMWARE_VERSION
+        string "Firmware version reported in authenticated telemetry"
+        default "0.1.0"
+        help
+            Increment for every approved release. Gate 2 binds this value to the
+            compiled artifact and deployment approval.
+
     config AES_WIFI_SSID
         string "WiFi SSID"
         default "AES-Gateway"
@@ -23,8 +30,23 @@ menu "AES Firmware Configuration"
 
     config AES_MQTT_BROKER_URI
         string "MQTT broker URI"
-        default "mqtt://192.168.4.1:1883"
+        default "mqtts://192.168.4.1:8883"
         help
-            Gateway broker. 8883/TLS variant uses the embedded srv_cert.crt.
+            TLS-only gateway broker. The ignored local srv_cert.crt must contain
+            the trusted public CA certificate, never the CA private key.
+
+    config AES_MQTT_USERNAME
+        string "Per-device MQTT username"
+        default ""
+        help
+            Must match AES_DEVICE_ID so the broker ACL pattern restricts this
+            identity to aes/telemetry/<username>. Set in sdkconfig.secrets.
+
+    config AES_MQTT_PASSWORD
+        string "Per-device MQTT password"
+        default ""
+        help
+            Unique password provisioned by the gateway. Set in
+            sdkconfig.secrets; never commit it.
 
 endmenu

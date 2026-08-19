@@ -44,7 +44,7 @@ export interface GateResult {
   note?: string;
 }
 
-// remediation payload — adapts by solution track (1 = OTA patch, 2 = firewall whitelist)
+// remediation payload — adapts by solution track (1 = signed firmware, 2 = quarantine)
 export interface PatchData {
   diff?: string; // unified diff (Solution 1)
   gates?: GateResult[]; // Semgrep gate results (Solution 1)
@@ -61,7 +61,7 @@ export interface Incident {
   reason: string;
   deviations: Deviations;
   baseline: Record<string, number>;
-  status: "OPEN" | "RESOLVED" | "FAILED" | "MANUAL_REVIEW";
+  status: "OPEN" | "AWAITING_APPROVAL" | "APPROVED" | "RESOLVED" | "FAILED" | "MANUAL_REVIEW";
   resolved_at?: string;
   latency_ms?: number;
   cve_id?: string;

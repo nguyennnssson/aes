@@ -4,7 +4,6 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AES — Live Security Console</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <style>
   :root{
     --bg:#0b0f14; --surface:#131a22; --surface2:#0f161d; --border:#232b36;
@@ -58,6 +57,10 @@
   .chartwrap{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;}
   .chartbox{position:relative;width:100%;height:240px;}
   .note{font-size:12px;color:var(--muted);margin-top:10px;}
+  .trend{display:flex;align-items:flex-end;gap:10px;height:210px;padding:14px 4px 0;overflow-x:auto}
+  .trend-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;min-width:62px;height:100%}
+  .trend-bar{width:28px;background:linear-gradient(#58a6ff,#1f6feb);border-radius:5px 5px 0 0;min-height:2px}
+  .trend-label,.trend-value{font:11px var(--mono);color:var(--muted);white-space:nowrap}
 </style>
 </head>
 <body>
@@ -84,106 +87,131 @@
 
   <h2>Self-improvement — detection threshold over time</h2>
   <div class="chartwrap">
-    <div class="chartbox"><canvas id="chart"></canvas></div>
+    <div class="chartbox"><div class="trend" id="chart"></div></div>
     <div class="note">Each deploy is an AI-proposed, sandbox-verified, human-approved rule. A lower threshold catches subtler, low-and-slow attacks.</div>
   </div>
 </div>
 
 <script>
-let chart = null;
 const $ = id => document.getElementById(id);
-const pct = x => (x == null ? "–" : Math.round(x * 100) + "%");
+const pct = value => value == null ? "–" : Math.round(Number(value) * 100) + "%";
+const node = (tag, className, text) => {
+  const item = document.createElement(tag);
+  if(className) item.className = className;
+  if(text !== undefined) item.textContent = String(text);
+  return item;
+};
+const empty = text => node("div", "empty", text);
+
+function dashboardToken(){
+  let token = sessionStorage.getItem("aesDashboardToken");
+  if(!token){
+    token = window.prompt("Enter the AES dashboard token") || "";
+    if(token) sessionStorage.setItem("aesDashboardToken", token);
+  }
+  return token;
+}
+
+async function api(path, options={}){
+  const token = dashboardToken();
+  const response = await fetch(path, {
+    ...options,
+    headers: {...(options.headers||{}), "X-AES-Admin-Token": token},
+  });
+  if(response.status === 401){ sessionStorage.removeItem("aesDashboardToken"); }
+  if(!response.ok) throw new Error(`request failed (${response.status})`);
+  return response;
+}
 
 function badge(status){
-  const cls = {attack:"b-attack",clean:"b-clean",elevated:"b-elevated",warming:"b-warming"}[status] || "b-clean";
-  return `<span class="badge ${cls}">${status||"clean"}</span>`;
+  const normalized = String(status || "clean").toLowerCase();
+  const cls = {attack:"b-attack",clean:"b-clean",elevated:"b-elevated",warming:"b-warming"}[normalized] || "b-clean";
+  return node("span", `badge ${cls}`, normalized);
 }
 
 function renderFleet(fleet){
-  const ids = Object.keys(fleet||{});
-  if(!ids.length){ $("fleet").innerHTML = `<div class="empty">waiting for telemetry…</div>`; return; }
-  $("fleet").innerHTML = ids.sort().map(id=>{
-    const d = fleet[id];
-    return `<div class="tile">
-      <div class="row"><span class="name">${id}</span>${badge(d.status)}</div>
-      <div class="metrics">cpu ${Math.round(d.cpu_percent)}% · ${Math.round(d.packet_rate)}/s · ${d.connection_count} conn</div>
-    </div>`;
-  }).join("");
+  const root = $("fleet"); root.replaceChildren();
+  const ids = Object.keys(fleet || {}).sort();
+  if(!ids.length){ root.append(empty("waiting for telemetry…")); return; }
+  for(const id of ids){
+    const data = fleet[id] || {};
+    const tile = node("div", "tile");
+    const row = node("div", "row");
+    row.append(node("span", "name", id), badge(data.status));
+    tile.append(row, node("div", "metrics", `cpu ${Math.round(Number(data.cpu_percent)||0)}% · ${Math.round(Number(data.packet_rate)||0)}/s · ${Number(data.connection_count)||0} conn`));
+    root.append(tile);
+  }
 }
 
-function renderPending(pending){
-  if(!pending || !pending.length){ $("pending").innerHTML = `<div class="empty">no skills awaiting approval</div>`; return; }
-  $("pending").innerHTML = pending.map(s=>{
-    const b = s.benchmark || {};
-    const p = s.params || {};
-    return `<div class="pending">
-      <div class="title">Hermes learning update — approval required</div>
-      <div class="meta">${s.skill_id} · ${s.cve_id||"CVE UNKNOWN"} · ${(s.attack_signature||"").slice(0,90)}</div>
-      <div class="change">
-        <span style="color:var(--muted)">proposed</span>
-        <span class="pill">deviation_threshold</span>
-        <span class="pill new">${p.deviation_threshold}</span>
-        <span class="pill">simultaneous ${p.simultaneous_threshold}</span>
-      </div>
-      <div class="bench">
-        <div class="stat"><div class="l">detection</div><div class="v">${pct(b.detection_rate)}</div></div>
-        <div class="stat"><div class="l">false positive</div><div class="v">${pct(b.false_positive_rate)}</div></div>
-        <div class="stat"><div class="l">samples</div><div class="v">${b.sample_size||0}</div></div>
-      </div>
-      <div class="actions">
-        <button class="approve" onclick="approve('${s.skill_id}')">Approve &amp; deploy</button>
-        <button class="reject" onclick="reject('${s.skill_id}')">Reject</button>
-      </div>
-    </div>`;
-  }).join("");
+function stat(label, value){
+  const item = node("div", "stat");
+  item.append(node("div", "l", label), node("div", "v", value));
+  return item;
+}
+
+function renderPending(items){
+  const root = $("pending"); root.replaceChildren();
+  if(!Array.isArray(items) || !items.length){ root.append(empty("no skills awaiting approval")); return; }
+  for(const skill of items){
+    const card = node("div", "pending");
+    card.append(node("div", "title", "Hermes learning update — approval required"));
+    card.append(node("div", "meta", `${skill.skill_id || "unknown"} · ${skill.cve_id || "CVE UNKNOWN"} · ${String(skill.attack_signature || "").slice(0,90)}`));
+    const change = node("div", "change");
+    change.append(node("span", "", "proposed"), node("span", "pill", "deviation_threshold"),
+      node("span", "pill new", skill.params?.deviation_threshold),
+      node("span", "pill", `simultaneous ${skill.params?.simultaneous_threshold ?? "–"}`));
+    card.append(change);
+    const bench = node("div", "bench");
+    bench.append(stat("detection", pct(skill.benchmark?.detection_rate)),
+      stat("false positive", pct(skill.benchmark?.false_positive_rate)),
+      stat("samples", skill.benchmark?.sample_size || 0));
+    card.append(bench);
+    const actions = node("div", "actions");
+    const approveButton = node("button", "approve", "Approve & deploy");
+    const rejectButton = node("button", "reject", "Reject");
+    approveButton.addEventListener("click", async () => { await api(`/api/approve/${encodeURIComponent(skill.skill_id)}`, {method:"POST"}); load(); });
+    rejectButton.addEventListener("click", async () => { await api(`/api/reject/${encodeURIComponent(skill.skill_id)}`, {method:"POST"}); load(); });
+    actions.append(approveButton, rejectButton); card.append(actions); root.append(card);
+  }
 }
 
 function renderIncidents(items){
-  if(!items || !items.length){ $("incidents").innerHTML = `<div class="empty">no incidents yet</div>`; return; }
-  $("incidents").innerHTML = items.map(i=>{
-    const v = i.verdict || {};
-    const st = (i.status||"OPEN").toUpperCase();
-    const stcls = st==="RESOLVED"?"b-clean":(st==="MANUAL_REVIEW"?"b-elevated":"b-attack");
-    const bits = [v.action, v.cve_id, "Solution "+(i.solution_track||"?")].filter(Boolean).join(" · ");
-    return `<div class="incident">
-      <div class="row"><span class="name">${i.device_id}</span><span class="badge ${stcls}">${st}</span></div>
-      <div class="detail">${(i.reason||"").slice(0,120)}</div>
-      <div class="detail">${bits}</div>
-    </div>`;
-  }).join("");
+  const root = $("incidents"); root.replaceChildren();
+  if(!Array.isArray(items) || !items.length){ root.append(empty("no incidents yet")); return; }
+  for(const incident of items){
+    const verdict = incident.verdict || {};
+    const status = String(incident.status || "OPEN").toUpperCase();
+    const statusClass = status === "RESOLVED" ? "b-clean" : status === "MANUAL_REVIEW" || status.includes("APPROVAL") ? "b-elevated" : "b-attack";
+    const card = node("div", "incident");
+    const row = node("div", "row");
+    row.append(node("span", "name", incident.device_id || "unknown"), node("span", `badge ${statusClass}`, status));
+    const bits = [verdict.action, verdict.cve_id, `Solution ${incident.solution_track || "?"}`].filter(Boolean).join(" · ");
+    card.append(row, node("div", "detail", String(incident.reason || "").slice(0,120)), node("div", "detail", bits));
+    root.append(card);
+  }
 }
 
 function renderChart(history){
-  const labels = (history||[]).map(h=>h.label);
-  const data = (history||[]).map(h=>h.threshold);
-  if(chart){ chart.data.labels=labels; chart.data.datasets[0].data=data; chart.update(); return; }
-  chart = new Chart($("chart"), {
-    type:"line",
-    data:{labels, datasets:[{label:"deviation_threshold",data,borderColor:"#58a6ff",backgroundColor:"rgba(88,166,255,.15)",fill:true,tension:.25,pointRadius:4,pointBackgroundColor:"#1f6feb"}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
-      scales:{y:{min:0,suggestedMax:.6,ticks:{color:"#8b949e",stepSize:.1},grid:{color:"#232b36"}},
-              x:{ticks:{color:"#8b949e"},grid:{color:"#232b36"}}}}
-  });
+  const root = $("chart"); root.replaceChildren();
+  for(const point of history || []){
+    const threshold = Math.max(0, Math.min(1, Number(point.threshold) || 0));
+    const col = node("div", "trend-col");
+    col.append(node("div", "trend-value", threshold.toFixed(2)));
+    const bar = node("div", "trend-bar"); bar.style.height = `${Math.max(2, threshold * 160)}px`;
+    col.append(bar, node("div", "trend-label", String(point.label || "").slice(0,18))); root.append(col);
+  }
 }
-
-async function approve(id){ await fetch("/api/approve/"+encodeURIComponent(id),{method:"POST"}); load(); }
-async function reject(id){ await fetch("/api/reject/"+encodeURIComponent(id),{method:"POST"}); load(); }
 
 async function load(){
   try{
-    const r = await fetch("/api/state");
-    const s = await r.json();
-    renderFleet(s.fleet);
-    renderPending(s.pending);
-    renderIncidents(s.incidents);
-    renderChart(s.history);
-    const ap = s.active_params||{};
-    $("params").innerHTML = `active rule · deviation <b>${ap.deviation_threshold}</b> · simultaneous <b>${ap.simultaneous_threshold}</b>`;
+    const response = await api("/api/state"); const state = await response.json();
+    renderFleet(state.fleet); renderPending(state.pending); renderIncidents(state.incidents); renderChart(state.history);
+    const params = state.active_params || {};
+    $("params").textContent = `active rule · deviation ${params.deviation_threshold ?? "–"} · simultaneous ${params.simultaneous_threshold ?? "–"}`;
     $("updated").textContent = new Date().toLocaleTimeString();
-  }catch(e){ $("updated").textContent = "offline"; }
+  }catch(error){ $("updated").textContent = "offline / unauthorized"; }
 }
-load();
-setInterval(load, 3000);
+load(); setInterval(load, 3000);
 </script>
 </body>
 </html>

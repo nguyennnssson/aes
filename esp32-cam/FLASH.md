@@ -71,8 +71,8 @@ I (xxx) AES_GATE2: Analyzing Running Partition: ota_0
 W (xxx) AES_GATE2: Safety Watchdog Started. 30-second validation window open...
 I (xxx) AES_GATE2: Network Link Established.
 I (xxx) AES_GATE2: MQTT Connected.
+I (xxx) AES_GATE2: Telemetry stream: {"device_id":"esp32-cam-02","timestamp":"...","boot_id":"...",...}
 I (xxx) AES_GATE2: SUCCESS! Safety validation passed. Rollback canceled. Firmware signed off!
-I (xxx) AES_GATE2: Telemetry stream: {"device_id":"esp32-cam-02","cpu_percent":15.0,...}
 ```
 
 Exit monitor: **Ctrl + ]**
@@ -149,7 +149,10 @@ idf.py menuconfig     → "AES Firmware Configuration"
 or put them in a gitignored `sdkconfig.secrets`:
 
 ```
-CONFIG_AES_WIFI_PASSWORD="<the AP passphrase — ask Son>"
+CONFIG_AES_WIFI_PASSWORD="<the AP passphrase>"
+CONFIG_AES_MQTT_USERNAME="esp32-cam-02"
+CONFIG_AES_MQTT_PASSWORD="<unique device password>"
+CONFIG_AES_MQTT_BROKER_URI="mqtts://192.168.4.1:8883"
 ```
 
 and build with `SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secrets" idf.py build`.
@@ -159,10 +162,11 @@ and build with `SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secrets" idf.py
 | WiFi SSID | `CONFIG_AES_WIFI_SSID` | `AES-Gateway` |
 | WiFi Password | `CONFIG_AES_WIFI_PASSWORD` | *(empty — must be set per build)* |
 | Device ID | `CONFIG_AES_DEVICE_ID` | `esp32-cam-02` |
-| MQTT Broker | `CONFIG_AES_MQTT_BROKER_URI` | `mqtt://192.168.4.1:1883` |
+| MQTT Broker | `CONFIG_AES_MQTT_BROKER_URI` | `mqtts://192.168.4.1:8883` |
+| MQTT Username | `CONFIG_AES_MQTT_USERNAME` | *(empty — must equal device ID)* |
+| MQTT Password | `CONFIG_AES_MQTT_PASSWORD` | *(empty — unique per device)* |
 | Telemetry topic | — | `aes/telemetry/<device id>` |
 | Telemetry interval | — | 5 seconds |
 
-> The AP passphrase also lives in `raspberry-pi/hostapd.conf` — since this repo
-> is public on GitHub, **rotate that passphrase** before any non-lab deployment
-> and keep the new one only in `sdkconfig.secrets` + the Pi's local config.
+> `raspberry-pi/hostapd.conf` contains only a placeholder. The gateway installer
+> refuses to start until a strong passphrase and TLS/MQTT credentials are supplied.

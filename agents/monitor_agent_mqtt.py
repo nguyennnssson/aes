@@ -17,17 +17,18 @@ Start it before the telemetry simulator or real hardware.
 
 PIPELINE ON ANOMALY:
   1. write_incident_log()      — saves to aes_incidents.jsonl
-  2. query_intel()             — ChromaDB RAG: top-10 CVE chunks
+  2. query_intel()             — local vector index: relevance-filtered CVE chunks
   3. hermes.analyze_incident() — Hermes reasoning layer
   4. respond()                 — routes verdict to Solution 1/2/3, posts Discord alert
   5. hitl.propose_skill()      — Solution 3 learning loop (auto, cooldown-gated)
 
 MQTT TOPICS:
   Subscribe: aes/telemetry/+   (all devices)
-  Broker:    localhost:1883 (Phase 0) → 8883 TLS (Duc, Week 3)
+  Broker:    MQTT_HOST:8883 with certificate validation and per-role credentials
 """
 
 import json
+import math
 import os
 import queue
 import sys
@@ -40,13 +41,12 @@ from dotenv import load_dotenv
 # Load .env from repo root before any API clients are initialized
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-import paho.mqtt.client as mqtt
-
-from agents.mqtt_compat import make_mqtt_client
+from agents.mqtt_compat import configure_mqtt_client, make_mqtt_client
 from agents.monitor_agent import (
     MonitorAgent,
     Telemetry,
     DEVICE_REGISTRY,
+    initialize_incident_audit,
     write_incident_log,
     write_normal_sample,
 )
@@ -54,8 +54,9 @@ from agents.monitor_agent import (
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 BROKER_HOST = os.getenv("MQTT_HOST", "localhost")
-BROKER_PORT  = int(os.getenv("MQTT_PORT", "1883"))
+BROKER_PORT  = int(os.getenv("MQTT_PORT", "8883"))
 TOPIC        = "aes/telemetry/+"        # canonical schema: aes/telemetry/{device_id}
+MAX_PAYLOAD_BYTES = 4096
 
 # Suppress repeat incidents on the same device for this long. Without this, a
 # sustained attack fires a full Intel+Hermes+Discord pipeline on every reading.
@@ -114,8 +115,6 @@ agents: dict[str, MonitorAgent] = {}
 active_incidents: set[str] = set()
 # Tracks the last incident time per device — enforces COOLDOWN_SECONDS.
 last_incident_time: dict[str, float] = {}
-# Devices that were successfully patched this session — won't re-trigger.
-patched_devices: set[str] = set()
 # Rolling counter for the console heartbeat.
 _reading_count = 0
 # Latest status per device, mirrored to FLEET_PATH for the dashboard.
@@ -133,7 +132,7 @@ _fleet_lock = threading.Lock()
 # Incident jobs are handed to a background worker so the MQTT callback thread
 # never blocks on Intel/Hermes/gates/flash (REVIEW P0-2). paho delivers messages
 # on ONE thread; running remediation inline blinds the whole fleet for minutes.
-_incident_queue: "queue.Queue" = queue.Queue()
+_incident_queue: "queue.Queue" = queue.Queue(maxsize=100)
 
 def get_agent(device_id: str) -> MonitorAgent:
     if device_id not in agents:
@@ -165,17 +164,33 @@ def on_message(client, userdata, msg):
     device_id = parts[2]
 
     # ── Parse payload → Telemetry ────────────────────────────────────────────
+    if len(msg.payload) > MAX_PAYLOAD_BYTES:
+        print(f"[MONITOR] Payload too large on {msg.topic}: {len(msg.payload)} bytes")
+        return
+
+    def _reject_constant(value):
+        raise ValueError(f"non-finite JSON number {value}")
+
     try:
-        data = json.loads(msg.payload.decode())
+        data = json.loads(msg.payload.decode("utf-8"), parse_constant=_reject_constant)
+        if not isinstance(data, dict):
+            raise TypeError("payload root must be an object")
+        for key in ("cpu_percent", "memory_percent", "packet_rate"):
+            if isinstance(data.get(key), bool) or type(data.get(key)) not in (int, float):
+                raise TypeError(f"{key} must be a JSON number")
+            if not math.isfinite(float(data[key])):
+                raise ValueError(f"{key} must be finite")
+        if isinstance(data.get("connection_count"), bool) or type(data.get("connection_count")) is not int:
+            raise TypeError("connection_count must be a JSON integer")
         telemetry = Telemetry(
             device_id        = data["device_id"],
-            timestamp        = data.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+            timestamp        = data["timestamp"],
             cpu_percent      = float(data["cpu_percent"]),
             memory_percent   = float(data["memory_percent"]),
             packet_rate      = float(data["packet_rate"]),
             connection_count = int(data["connection_count"]),
         )
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError) as e:
         print(f"[MONITOR] Bad payload on {msg.topic}: {e}")
         return
 
@@ -188,11 +203,10 @@ def on_message(client, userdata, msg):
         print(f"[MONITOR] Rejected spoofed telemetry: topic={device_id} payload={telemetry.device_id}")
         return
 
-    # Optional strict enrollment: reject devices not in the registry. Lazy
-    # auto-registration is convenient on the bench but is an unauthenticated
-    # enrollment path in production — gate it behind AES_STRICT_REGISTRY=1.
-    if os.getenv("AES_STRICT_REGISTRY") == "1" and device_id not in DEVICE_REGISTRY:
-        print(f"[MONITOR] Rejected unregistered device (AES_STRICT_REGISTRY): {device_id}")
+    # Enrollment is strict by default. The broker ACL also binds a device's MQTT
+    # username to its own topic. Labs can explicitly opt into discovery.
+    if device_id not in DEVICE_REGISTRY and os.getenv("AES_ALLOW_UNREGISTERED_DEVICES") != "1":
+        print(f"[MONITOR] Rejected unregistered device: {device_id}")
         return
 
     # ── Run anomaly detection ─────────────────────────────────────────────────
@@ -203,7 +217,7 @@ def on_message(client, userdata, msg):
     # Suppress the routine "Normal" flood; print only anomalies, elevated/invalid
     # readings, and a periodic heartbeat so you can see the monitor is alive.
     _reading_count += 1
-    now   = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
     quiet = (not result.is_anomaly) and result.reason.startswith(("Normal", "Warming"))
 
     if not quiet:
@@ -227,15 +241,16 @@ def on_message(client, userdata, msg):
         fstat = "warming"
     else:
         fstat = "clean"
-    fleet_state[device_id] = {
-        "status":           fstat,
-        "cpu_percent":      telemetry.cpu_percent,
-        "packet_rate":      telemetry.packet_rate,
-        "connection_count": telemetry.connection_count,
-        "last_seen":        now,
-    }
     with _fleet_lock:
         try:
+            fleet_state[device_id] = {
+                "status":           fstat,
+                "cpu_percent":      telemetry.cpu_percent,
+                "memory_percent":   telemetry.memory_percent,
+                "packet_rate":      telemetry.packet_rate,
+                "connection_count": telemetry.connection_count,
+                "last_seen":        now,
+            }
             _tmp = FLEET_PATH.with_suffix(".json.tmp")
             _tmp.write_text(json.dumps(fleet_state))
             os.replace(_tmp, FLEET_PATH)
@@ -263,8 +278,6 @@ def on_message(client, userdata, msg):
     # The heavy remediation (Intel + Hermes + gates + flash) runs in a background
     # worker so telemetry from other devices keeps flowing during an incident.
     now_ts = time.time()
-    if device_id in patched_devices:
-        return
     if device_id in active_incidents or (now_ts - last_incident_time.get(device_id, 0.0)) < COOLDOWN_SECONDS:
         print(f"  ⏸ [{device_id}] incident in-flight or within {COOLDOWN_SECONDS}s cooldown — skipping")
         return
@@ -284,14 +297,19 @@ def on_message(client, userdata, msg):
     print(f"  ✅ Incident logged: {incident_id} — queued for remediation")
     print(f"{'='*60}\n")
 
-    _incident_queue.put({
-        "incident_id": incident_id,
-        "device_id":   device_id,
-        "device_info": device_info,
-        "reason":      result.reason,
-        "confidence":  result.confidence,
-        "detected_at": now_ts,
-    })
+    try:
+        _incident_queue.put_nowait({
+            "incident_id": incident_id,
+            "device_id":   device_id,
+            "device_info": device_info,
+            "reason":      result.reason,
+            "confidence":  result.confidence,
+            "detected_at": now_ts,
+        })
+    except queue.Full:
+        active_incidents.discard(device_id)
+        update_incident_fields(incident_id, stage="queue_full", status="FAILED")
+        print(f"  [MONITOR] Remediation queue full — {incident_id} held as FAILED")
 
 
 def _process_incident(job: dict) -> None:
@@ -303,7 +321,7 @@ def _process_incident(job: dict) -> None:
     device_info = job["device_info"]
     reason      = job["reason"]
     try:
-        # Step 2: Intel Agent — query ChromaDB for relevant CVEs
+        # Step 2: Intel Agent — query the embedded vector index for relevant CVEs
         print(f"  🔍 [{device_id}] Querying Intel Agent...")
         intel_report = run_intel(device_id, reason)
         print(f"  {intel_report[:200]}...")
@@ -325,10 +343,7 @@ def _process_incident(job: dict) -> None:
             "detected_at":    job["detected_at"],   # true detect→respond latency
             "status":         "OPEN",
         }
-        resolved = respond(incident_record, verdict)
-        if resolved:
-            patched_devices.add(device_id)
-            print(f"  [{device_id}] marked as patched — won't re-trigger this session")
+        respond(incident_record, verdict)
 
         # Step 5: HITL learning loop — propose improved detection params
         print(f"\n  🔁 [{device_id}] Proposing Hermes skill update...")
@@ -368,11 +383,14 @@ def on_disconnect(client, userdata, rc):
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main():
+    audit_problems = initialize_incident_audit(production=os.getenv("AES_PRODUCTION") == "1")
+    if audit_problems:
+        raise RuntimeError("incident audit verification failed: " + "; ".join(audit_problems[:5]))
     print("=" * 60)
     print("AES — Monitor Agent (MQTT Mode)")
     print(f"Broker : {BROKER_HOST}:{BROKER_PORT}")
     print(f"Topic  : {TOPIC}")
-    print(f"Intel  : ChromaDB via IntelAgent")
+    print(f"Intel  : embedded SQLite vector index via IntelAgent")
     print("=" * 60 + "\n")
 
     # Start the incident worker before connecting so no job is ever dropped.
@@ -381,6 +399,7 @@ def main():
     print("[MONITOR] Incident worker thread started")
 
     client = make_mqtt_client("aes-monitor-agent")
+    configure_mqtt_client(client, role="monitor")
     client.on_connect    = on_connect
     client.on_message    = on_message
     client.on_disconnect = on_disconnect

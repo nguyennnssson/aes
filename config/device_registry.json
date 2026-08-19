@@ -5,7 +5,7 @@
     "owner": "Vy",
     "firmware": "open",
     "status": "live",
-    "notes": "Live device. Solution 1 — OTA patch pipeline."
+    "notes": "Live device. Solution 1 prepares strictly validated, signed firmware for explicit approval and serial installation."
   },
   "esp32-cam-02": {
     "model": "ESP32-CAM",
@@ -29,6 +29,6 @@
     "owner": "Duc",
     "firmware": "closed",
     "status": "live",
-    "notes": "Reference device for Solution 2 — three-source network whitelist. Set 'ip' to the camera's DHCP lease (192.168.4.10-50 on the AP) or export AES_DEVICE_IP_TAPO_C200_01. Hikvision/Reolink are one-config-file extensions when hardware arrives."
+    "notes": "Reference device for Solution 2 gateway quarantine. Add registry-pinned ip and mac values matching a static gateway DHCP lease before enforcement."
   }
 }

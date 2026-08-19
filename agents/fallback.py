@@ -6,7 +6,7 @@ Activated when the OpenAI reasoning backend is unreachable (connection or timeou
 Exposes the same analyze_incident() signature as Hermes so the swap is transparent.
 
 Model: llama3:8b-instruct-q4_K_M via Ollama (local, never co-resident with live path)
-  - Loaded on demand, unloaded after use to preserve unified memory for ChromaDB.
+  - Loaded on demand, unloaded after use to preserve memory for local embeddings.
   - Pull once: ollama pull llama3:8b-instruct-q4_K_M
 
 Limitations vs Hermes:
@@ -18,6 +18,8 @@ Usage: instantiated inside hermes.py — not called directly.
 """
 
 import json
+import math
+import re
 import subprocess
 import requests
 from agents.hermes import IncidentVerdict
@@ -71,17 +73,28 @@ class OllamaFallback:
             print(f"[FALLBACK] Ollama call failed: {e}")
             parsed = {}
         finally:
-            # Unload model after use to free unified memory for ChromaDB
+            # Unload model after use to free memory for the embedding model.
             self._unload_model()
 
+        try:
+            confidence = float(parsed.get("confidence", 0.3) or 0.3)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if not math.isfinite(confidence):
+            confidence = 0.0
+        expected_action = {1: "PATCH_OTA", 2: "BLOCK_FIREWALL", 3: "REWRITE_SKILL"}.get(solution_track)
+        action = parsed.get("action") if parsed.get("action") == expected_action else "INVESTIGATE"
+        cve_id = str(parsed.get("cve_id", "UNKNOWN")).upper()
+        if cve_id != "UNKNOWN" and not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id):
+            cve_id = "UNKNOWN"
         return IncidentVerdict(
             solution_track = solution_track,
-            action         = parsed.get("action", "INVESTIGATE"),
-            cve_id         = parsed.get("cve_id", "UNKNOWN"),
+            action         = action,
+            cve_id         = cve_id,
             # Cap confidence at 0.49 so a degraded (local Llama) verdict ALWAYS
             # lands in respond()'s `confidence < 0.5` MANUAL_REVIEW hold rather
             # than auto-executing remediation (REVIEW P1-5).
-            confidence = min(float(parsed.get("confidence", 0.3) or 0.3), 0.49),
+            confidence = min(max(confidence, 0.0), 0.49),
             reasoning      = f"[OFFLINE FALLBACK] {parsed.get('reasoning', 'OpenAI backend unreachable — local inference only')}",
         )
 

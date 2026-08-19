@@ -54,9 +54,16 @@ class Injector:
             print(f"[INJECT] Refused — skill {skill.skill_id} is {skill.status}, not APPROVED")
             return False
 
-        if not isinstance(skill.params, dict) or not skill.params:
+        if not skill.approval_is_valid():
+            print(f"[INJECT] Refused — skill {skill.skill_id} approval signature is missing or invalid")
+            return False
+
+        from agents.monitor_agent import validate_detection_params
+        validated = validate_detection_params(skill.params)
+        if not validated or set(validated) != set(skill.params):
             print(f"[INJECT] Refused — skill {skill.skill_id} has no valid params")
             return False
+        skill.params = validated
 
         print(f"[INJECT] Injecting skill {skill.skill_id} (v{skill.version}) params={skill.params}")
 

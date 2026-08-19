@@ -9,10 +9,10 @@ that tells OpenClaw what to do.
 Hermes does NOT execute anything. OpenClaw executes. Hermes decides.
 
 Models (env-controlled, backend-swappable — see agents/llm_client.py):
-  - Reasoning (verdicts, classification, self-tuning):  HERMES_MODEL      (default gpt-5)
-  - Firmware patch generation (Codex, code-in-a-loop):  HERMES_CODE_MODEL (default gpt-5-codex)
+  - Reasoning (verdicts, classification, self-tuning):  HERMES_MODEL
+  - Firmware patch generation (code-in-a-loop):         HERMES_CODE_MODEL
 
-Point HERMES_MODEL at a newer reasoning model (e.g. gpt-6) with no code change.
+Both API roles default to gpt-5.6-sol and can be changed without code changes.
 
 Usage:
     from agents.hermes import Hermes
@@ -30,6 +30,7 @@ Usage:
 import os
 import re
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,9 +87,9 @@ class Hermes:
     def __init__(self, client, model: str = None):
         self.client = client
         # CLI-backend clients carry their own model; API clients use HERMES_MODEL.
-        self.model  = model or getattr(client, "model", None) or os.getenv("HERMES_MODEL", "gpt-5")
-        # Firmware patch generation is a coding task — route it to Codex.
-        self.code_model = os.getenv("HERMES_CODE_MODEL", "gpt-5-codex")
+        self.model = (model or getattr(client, "model", None)
+                      or os.getenv("HERMES_MODEL", "gpt-5.6-sol"))
+        self.code_model = os.getenv("HERMES_CODE_MODEL", "gpt-5.6-sol")
         self._system_prompt = self._load_system_prompt()
         print(f"[HERMES] Initialized — reasoning: {self.model}, code: {self.code_model}")
 
@@ -113,7 +114,7 @@ class Hermes:
             device_id:      e.g. "esp32-cam-01"
             anomaly_reason: EWMA anomaly description from Monitor Agent
             intel_context:  formatted CVE chunks from Intel Agent
-            solution_track: 1 (OTA), 2 (firewall), 3 (skill rewrite)
+            solution_track: 1 (signed firmware), 2 (firewall), 3 (skill rewrite)
 
         Returns:
             IncidentVerdict with action, cve_id, confidence, reasoning.
@@ -182,18 +183,40 @@ class Hermes:
                 reasoning      = f"Rejected unrecognized action {action!r} — held for manual review.",
             )
 
+        expected_action = {1: "PATCH_OTA", 2: "BLOCK_FIREWALL", 3: "REWRITE_SKILL"}.get(solution_track)
+        if action != expected_action:
+            return IncidentVerdict(
+                solution_track=solution_track,
+                action="INVESTIGATE",
+                cve_id="UNKNOWN",
+                confidence=0.0,
+                reasoning=f"Action {action!r} does not match trusted solution track {solution_track}.",
+            )
+
         try:
             confidence = float(parsed.get("confidence", 0.5))
         except (TypeError, ValueError):
             confidence = 0.0
+        if not math.isfinite(confidence):
+            confidence = 0.0
         confidence = max(0.0, min(1.0, confidence))   # clamp to [0, 1]
+
+        cve_id = str(parsed.get("cve_id", "UNKNOWN")).upper()
+        if cve_id != "UNKNOWN" and not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id):
+            cve_id = "UNKNOWN"
+            confidence = 0.0
+        weak_intel = any(marker in intel_context for marker in (
+            "INTEL UNAVAILABLE", "Knowledge base is empty", "No relevant CVEs",
+        ))
+        if weak_intel or cve_id == "UNKNOWN":
+            confidence = min(confidence, 0.49)
 
         return IncidentVerdict(
             solution_track = solution_track,
             action         = action,
-            cve_id         = parsed.get("cve_id", "UNKNOWN"),
+            cve_id         = cve_id,
             confidence     = confidence,
-            reasoning      = parsed.get("reasoning", ""),
+            reasoning      = str(parsed.get("reasoning", ""))[:2000],
         )
 
     def generate_patch(
@@ -230,7 +253,7 @@ class Hermes:
         )
 
         msg = self.client.messages.create(
-            model=self.code_model,   # Codex — coding model, tuned for patch/diff generation
+            model=self.code_model,
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
             timeout=60.0,   # patch generation is larger — give it more headroom

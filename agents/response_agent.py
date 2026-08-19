@@ -14,17 +14,16 @@ HOW TO RUN:
   Not run directly — called by agents/monitor_agent_mqtt.py.
 
 SOLUTION ROUTING:
-  Track 1 → handle_solution_1() → OTA patch pipeline
-             [DUC + VY: replace stub with real esptool.py OTA execution]
-  Track 2 → handle_solution_2() → iptables whitelist rule
-             [DUC: replace stub with real SSH + iptables write to Pi gateway]
+  Track 1 → handle_solution_1() → strict signed-firmware remediation preparation
+  Track 2 → handle_solution_2() → verified gateway quarantine
   (Solution 3 — the Hermes learning loop — is NOT routed here. It is triggered
    directly from the monitor path via skills.hitl.propose_skill(); see
    agents/monitor_agent_mqtt.py.)
 
 RED LINES (never skip these):
   - Never write a live iptables rule without --check dry-run passing first.
-  - Never trigger OTA flash without Gate 1 AND Gate 2 both cleared.
+  - Never install firmware without strict Gate 1/Gate 2 evidence, signature
+    verification, hardware attestation, and hash-bound approval.
   - Never discard a failed patch — log to outputs/patches/failed/.
 
 RETRY LOGIC:
@@ -33,8 +32,11 @@ RETRY LOGIC:
 """
 
 import difflib
+import hmac
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from discord.discord_alerts import post_incident_alert
-from agents.monitor_agent import DEVICE_REGISTRY
+from agents.monitor_agent import DEVICE_REGISTRY, initialize_incident_audit, update_incident_entry
 
 # ─── PATCH HELPER ────────────────────────────────────────────────────────────
 
@@ -166,6 +168,34 @@ def _apply_hermes_diff(source_text: str, raw_diff: str, src_name: str) -> tuple:
     return patched, proper_diff
 
 
+def _validate_patch_policy(patch_diff: str) -> str | None:
+    """Reject model patches that alter the firmware's security control plane.
+
+    Gate 1 detects known unsafe C patterns; this complementary policy prevents a
+    small vulnerability fix from quietly changing trust anchors, identity,
+    credentials, OTA state, or boot attestation. Such changes require a normal
+    reviewed source-code change, not autonomous incident remediation.
+    """
+    changed = [line[1:] for line in patch_diff.splitlines()
+               if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
+    if len(changed) > 100:
+        return f"patch changes {len(changed)} lines; autonomous limit is 100"
+    sensitive = (
+        "config_aes_", "mqtt_broker", "mqtt_cfg", "srv_cert", "certificate",
+        "username", "password", "validate_and_confirm_app", "esp_ota_",
+        "esp_efuse", "secure_boot", "flash_encrypt", "boot_id", "device_id",
+        "firmware_version", "system(", "popen(",
+    )
+    for line in changed:
+        lowered = line.lower()
+        if line.lstrip().startswith("#include"):
+            return "autonomous patches may not expand the include/dependency surface"
+        hit = next((token for token in sensitive if token in lowered), None)
+        if hit:
+            return f"patch touches protected firmware control-plane token {hit!r}"
+    return None
+
+
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 LOG_PATH    = Path("./aes_incidents.jsonl")
@@ -182,7 +212,86 @@ _GATE1_RULES = [
     ("esp32-cwe416-use-after-free",        "CWE-416", "use-after-free"),
     ("esp32-cwe78-command-injection",      "CWE-78",  "command injection"),
     ("esp32-cwe798-hardcoded-credentials", "CWE-798", "hardcoded creds"),
+    ("esp32-cwe134-nonliteral-format",     "CWE-134", "format string"),
+    ("esp32-cwe190-unchecked-allocation",  "CWE-690", "unchecked allocation"),
+    ("esp32-private-key-material",          "KEY",     "private key material"),
 ]
+
+OUTCOME_RESOLVED = "resolved"
+OUTCOME_PENDING = "pending"
+OUTCOME_FAILED = "failed"
+_INCIDENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,159}$")
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _incident_paths(incident_id: str) -> dict[str, Path]:
+    if not isinstance(incident_id, str) or not _INCIDENT_ID_RE.fullmatch(incident_id):
+        raise ValueError("incident_id contains unsafe characters")
+    pending = Path("outputs/patches/pending")
+    failed = Path("outputs/patches/failed")
+    deployed = Path("outputs/patches/deployed")
+    artifact = Path("outputs/gate2") / incident_id
+    return {
+        "pending": pending,
+        "failed": failed,
+        "deployed": deployed,
+        "patch": pending / f"{incident_id}.patch",
+        "manifest": pending / f"{incident_id}.manifest.json",
+        "failed_patch": failed / f"{incident_id}.patch",
+        "failed_manifest": failed / f"{incident_id}.manifest.json",
+        "deployed_patch": deployed / f"{incident_id}.patch",
+        "deployed_manifest": deployed / f"{incident_id}.manifest.json",
+        "artifact": artifact,
+    }
+
+
+def _archive_failed_patch(paths: dict[str, Path], manifest: dict | None = None):
+    """Move, rather than copy, a rejected patch out of the deployable queue."""
+    paths["failed"].mkdir(parents=True, exist_ok=True)
+    if manifest is not None:
+        manifest = {**manifest, "validation_status": "REJECTED"}
+        paths["manifest"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if paths["patch"].exists():
+        os.replace(paths["patch"], paths["failed_patch"])
+    if paths["manifest"].exists():
+        os.replace(paths["manifest"], paths["failed_manifest"])
+
+
+def _approval_signature(manifest: dict) -> str:
+    key = os.getenv("AES_DEPLOY_APPROVAL_KEY", "")
+    if len(key) < 32:
+        raise ValueError("AES_DEPLOY_APPROVAL_KEY must contain at least 32 characters")
+    bound = {
+        "incident_id": manifest.get("incident_id"),
+        "device_id": manifest.get("device_id"),
+        "patch_sha256": manifest.get("patch_sha256"),
+        "source_sha256": manifest.get("source_sha256"),
+        "patched_source_sha256": manifest.get("patched_source_sha256"),
+        "binary_sha256": manifest.get("binary_sha256"),
+        "artifact_path": manifest.get("artifact_path"),
+        "firmware_version": manifest.get("firmware_version"),
+    }
+    return hmac.new(key.encode("utf-8"), json.dumps(bound, sort_keys=True).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _load_incident(incident_id: str) -> dict | None:
+    if not LOG_PATH.exists():
+        return None
+    for line in LOG_PATH.read_text(encoding="utf-8").splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("incident_id") == incident_id:
+            return entry
+    return None
 
 
 def _gate1_results(g1: dict) -> list:
@@ -194,14 +303,14 @@ def _gate1_results(g1: dict) -> list:
             "rule_id": short_id,
             "label":   label,
             "passed":  semgrep_id not in by_rule,
-            "note":    by_rule[semgrep_id]["message"] if semgrep_id in by_rule else "resolved",
+            "note":    by_rule[semgrep_id]["message"] if semgrep_id in by_rule else "pass",
         }
         for semgrep_id, short_id, label in _GATE1_RULES
     ]
 
 
 # ─── SOLUTION HANDLERS ───────────────────────────────────────────────────────
-# Each handler returns True on success, False on failure.
+# Handlers return resolved, pending, or failed (legacy True remains accepted).
 # Duc wires Solution 1 + 2. Solution 3 (the learning loop) runs from the monitor
 # path (skills.hitl), not here.
 
@@ -228,7 +337,8 @@ def _run_gate1(patched_text: str, src_name: str) -> dict:
         try:
             g1_proc = subprocess.run(
                 [sys.executable, "gate1.py", str(tmp_main_dir / src_name)],
-                capture_output=True, text=True, cwd="gates/semgrep", timeout=120,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd="gates/semgrep", timeout=120,
             )
         except subprocess.TimeoutExpired:
             return {"passed": False, "error": "Gate 1 timed out after 120s"}
@@ -236,7 +346,11 @@ def _run_gate1(patched_text: str, src_name: str) -> dict:
         try:
             marker = "--- GATE 1 OUTPUT RESULT ---"
             g1_text = g1_proc.stdout
-            return json.loads(g1_text[g1_text.index(marker) + len(marker):].strip())
+            result = json.loads(g1_text[g1_text.index(marker) + len(marker):].strip())
+            if g1_proc.returncode != 0:
+                result["passed"] = False
+                result.setdefault("error", f"Gate 1 exited with code {g1_proc.returncode}")
+            return result
         except (ValueError, json.JSONDecodeError):
             return {"passed": False, "error": "Gate 1 output parse failure"}
 
@@ -252,21 +366,30 @@ def _format_gate1_feedback(g1: dict) -> str:
     )
 
 
-def _run_gate2(patched_text: str) -> dict:
+def _run_gate2(patched_text: str, incident_id: str) -> dict:
     """Run the Compile-Boot-Diff harness on the patched source. Returns its
     {"passed", "stages"|"error"} dict. Never raises."""
     gate2_path = Path("gates/gate2.py")
     g2_args = [sys.executable, str(gate2_path.resolve())]
-    if os.getenv("AES_GATE2_STRICT") == "1":
-        g2_args.append("--strict")
+    paths = _incident_paths(incident_id)
+    env = os.environ.copy()
+    env["GATE2_ARTIFACT_DIR"] = str(paths["artifact"])
     with tempfile.NamedTemporaryFile("w", suffix=".c", delete=False, encoding="utf-8") as g2_src:
         g2_src.write(patched_text)
         g2_src_path = g2_src.name
     try:
-        g2_proc = subprocess.run(g2_args + [g2_src_path], capture_output=True, text=True, timeout=900)
+        g2_proc = subprocess.run(
+            g2_args + [g2_src_path], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=900, env=env,
+        )
         marker = "--- GATE 2 OUTPUT RESULT ---"
         g2_text = g2_proc.stdout
-        return json.loads(g2_text[g2_text.index(marker) + len(marker):].strip())
+        result = json.loads(g2_text[g2_text.index(marker) + len(marker):].strip())
+        skipped = any(stage.get("status") == "skipped" for stage in result.get("stages", []))
+        if g2_proc.returncode != 0 or skipped or not result.get("strict"):
+            result["passed"] = False
+            result.setdefault("error", "Gate 2 did not complete every strict stage")
+        return result
     except subprocess.TimeoutExpired:
         return {"passed": False, "error": "Gate 2 timed out after 900s"}
     except (ValueError, json.JSONDecodeError):
@@ -275,81 +398,41 @@ def _run_gate2(patched_text: str) -> dict:
         os.unlink(g2_src_path)
 
 
-def _staged_firmware_build(patched_text: str) -> Path | None:
+def _flash_and_confirm(device_id: str, incident_id: str, manifest: dict) -> bool:
     """
-    Build the PATCHED firmware and return the path to the app binary, or None if
-    the ESP-IDF toolchain is absent.
-
-    CRITICAL (REVIEW P0-1): the ESP-IDF project compiles only main.c (see
-    esp32-cam/main/CMakeLists.txt), so building the in-tree project would flash
-    the ORIGINAL firmware. We instead stage a copy of the project with the patched
-    text written AS main.c and build that — mirroring gates/gate2.py check_compile.
-    When Gate 2's compile stage already produced outputs/gate2/verified_firmware.bin
-    from this same patched source, reuse it instead of rebuilding.
+    Install the exact artifact certified by Gate 2 and confirm an authenticated
+    fresh boot. Missing hardware or evidence is a failure, never a simulation.
     """
-    verified = Path("outputs/gate2/verified_firmware.bin")
-    if verified.exists():
-        print(f"    Reusing Gate 2 verified binary → {verified}")
-        return verified
+    firmware_bin = Path(manifest.get("artifact_path", ""))
+    if (not firmware_bin.is_file()
+            or _sha256_file(firmware_bin) != manifest.get("binary_sha256")):
+        print("    [ERROR] Gate 2 artifact is missing or changed")
+        update_incident_fields(incident_id, stage="artifact_invalid")
+        return False
 
-    idf = shutil.which("idf.py")
-    if not idf:
-        return None
-
-    project_dir = Path("esp32-cam")
-    with tempfile.TemporaryDirectory(prefix="aes-sol1-") as tmp:
-        staged = Path(tmp) / "esp32-cam"
-        shutil.copytree(
-            project_dir, staged,
-            ignore=shutil.ignore_patterns("build", "sdkconfig.old", "managed_components"),
-        )
-        # The staged build compiles the PATCHED text as main.c; the production
-        # tree is never touched. Remove the alternate sources so only main.c wins.
-        (staged / "main" / "main.c").write_text(patched_text, encoding="utf-8")
-        for extra in ("main_vulnerable.c", "main_patched.c"):
-            (staged / "main" / extra).unlink(missing_ok=True)
-        try:
-            build = subprocess.run([idf, "build"], capture_output=True, text=True,
-                                   cwd=staged, timeout=600)
-        except subprocess.TimeoutExpired:
-            print("    [ERROR] Staged build timed out after 600s")
-            return None
-        if build.returncode != 0:
-            print(f"    [ERROR] Staged build failed:\n{build.stderr[-800:]}")
-            return None
-        staged_build = staged / "build"
-        # Prefer the project's app binary by name; fall back to the largest .bin
-        # (the app image dwarfs bootloader/partition binaries).
-        named = staged_build / "aes_esp32_cam.bin"
-        if named.exists():
-            src_bin = named
-        else:
-            bins = list(staged_build.glob("*.bin"))
-            if not bins:
-                print("    [ERROR] Staged build produced no .bin")
-                return None
-            src_bin = max(bins, key=lambda p: p.stat().st_size)
-        out_dir = Path("outputs/gate2")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_bin = out_dir / "verified_firmware.bin"
-        shutil.copy2(src_bin, out_bin)
-        print(f"    Staged patched build → {out_bin}")
-        return out_bin
-
-
-def _flash_and_confirm(device_id: str, incident_id: str, patched_text: str) -> bool:
-    """
-    Build the patched firmware, flash it, and confirm the device reboots.
-    Only reached when AES_FLASH_ENFORCE=1 (a real physical write). On the bench
-    without a toolchain it self-skips and reports no_hardware (returns True).
-    """
-    print(f"    Building patched firmware...")
-    update_incident_fields(incident_id, stage="building")
-    firmware_bin = _staged_firmware_build(patched_text)
-    if firmware_bin is None:
-        print(f"    [WARN] ESP-IDF toolchain unavailable — build/flash skipped (no hardware)")
-        update_incident_fields(incident_id, stage="no_hardware")
-        return True
+    public_key = os.getenv("AES_FIRMWARE_PUBLIC_KEY")
+    espsecure = shutil.which("espsecure.py") or shutil.which("espsecure")
+    esptool = shutil.which("esptool.py") or shutil.which("esptool")
+    if not public_key or not Path(public_key).is_file() or not espsecure:
+        print("    [ERROR] ESP-IDF signature verification or the firmware public key is not configured")
+        update_incident_fields(incident_id, stage="signature_unverified")
+        return False
+    if not esptool:
+        print("    [ERROR] ESP-IDF flashing tool is not available")
+        update_incident_fields(incident_id, stage="flash_failed")
+        return False
+    verify = subprocess.run(
+        [espsecure, "verify_signature", "--version", "2", "--keyfile", public_key, str(firmware_bin)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+    )
+    if verify.returncode != 0:
+        print(f"    [ERROR] Firmware signature rejected: {(verify.stderr or verify.stdout)[-400:]}")
+        update_incident_fields(incident_id, stage="signature_unverified")
+        return False
+    if os.getenv("AES_HARDWARE_SECURITY_VERIFIED") != "1":
+        print("    [ERROR] Refused: secure boot + flash encryption have not been attested for this device")
+        update_incident_fields(incident_id, stage="hardware_security_unverified")
+        return False
 
     device_info = DEVICE_REGISTRY.get(device_id, {})
     serial_port = device_info.get("port") or os.getenv("ESP32_PORT")
@@ -359,11 +442,11 @@ def _flash_and_confirm(device_id: str, incident_id: str, patched_text: str) -> b
         update_incident_fields(incident_id, stage="flash_failed")
         return False
 
-    print(f"    Flashing {firmware_bin.name} → {serial_port}...")
+    print(f"    Installing signed {firmware_bin.name} → {serial_port}...")
     update_incident_fields(incident_id, stage="flashing")
     try:
         flash = subprocess.run(
-            ["esptool.py", "--chip", "esp32", "--port", serial_port,
+            [esptool, "--chip", "esp32", "--port", serial_port,
              "--baud", "460800", "write_flash", "0x10000", str(firmware_bin)],
             capture_output=True, text=True, timeout=120,
         )
@@ -373,7 +456,7 @@ def _flash_and_confirm(device_id: str, incident_id: str, patched_text: str) -> b
             return False
         print(f"    Flash complete")
     except FileNotFoundError:
-        print(f"    [ERROR] esptool.py not found — install with: pip install esptool")
+        print("    [ERROR] ESP-IDF flashing tool disappeared before deployment")
         update_incident_fields(incident_id, stage="flash_failed")
         return False
     except subprocess.TimeoutExpired:
@@ -382,35 +465,57 @@ def _flash_and_confirm(device_id: str, incident_id: str, patched_text: str) -> b
         return False
 
     # ── MQTT boot confirmation (35s window per OTA_LIFECYCLE.md) ──────────────
-    # Boot proof must come from THIS device's fresh telemetry (REVIEW P1-9): the
-    # message's payload device_id must match, and its timestamp must be newer than
-    # the flash. A running simulator for the same id can't fake it via timestamp.
+    # Boot evidence must come from THIS device's ACL-restricted MQTT identity and
+    # report the approved firmware version, a new boot id, and a post-flash
+    # timestamp. These are corroborating checks; the hardware/build gates remain
+    # the primary authorization boundary.
     print(f"    Waiting for {device_id} MQTT boot confirmation (35s)...")
     update_incident_fields(incident_id, stage="validating")
-    from agents.mqtt_compat import make_mqtt_client
+    from agents.mqtt_compat import configure_mqtt_client, make_mqtt_client
 
     flashed_at = datetime.now(timezone.utc).isoformat()
     confirmed = threading.Event()
+    boot_evidence = {}
 
     def _on_boot_msg(client, _userdata, msg):
+        if len(msg.payload) > 4096:
+            return
         try:
-            data = json.loads(msg.payload.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = json.loads(
+                msg.payload.decode("utf-8"),
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             return
         if data.get("device_id") != device_id:
             return
-        # Require a post-flash timestamp when the firmware provides one.
+        # Authenticated per-device broker ACLs make this topic an identity proof.
+        # The firmware must also provide a fresh boot id and timestamp.
         ts = data.get("timestamp")
-        if ts and ts < flashed_at:
+        boot_id = data.get("boot_id")
+        try:
+            boot_time = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            flash_time = datetime.fromisoformat(flashed_at)
+        except ValueError:
             return
+        if boot_time.tzinfo is None or boot_time.astimezone(timezone.utc) < flash_time:
+            return
+        if not isinstance(boot_id, str) or len(boot_id) < 8:
+            return
+        if data.get("firmware_version") != manifest.get("firmware_version"):
+            return
+        if type(data.get("sequence")) is not int or not (0 <= data["sequence"] <= 10):
+            return
+        boot_evidence.update({"boot_id": boot_id, "timestamp": ts})
         confirmed.set()
         client.disconnect()
 
     boot_mqtt = make_mqtt_client("aes-boot-verify")
+    configure_mqtt_client(boot_mqtt, role="monitor")
     boot_mqtt.on_message = _on_boot_msg
     try:
         mqtt_host = os.getenv("MQTT_HOST", "localhost")
-        mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
+        mqtt_port = int(os.getenv("MQTT_PORT", "8883"))
         boot_mqtt.connect(mqtt_host, mqtt_port, keepalive=10)
         boot_mqtt.subscribe(f"aes/telemetry/{device_id}")
         boot_mqtt.loop_start()
@@ -426,7 +531,7 @@ def _flash_and_confirm(device_id: str, incident_id: str, patched_text: str) -> b
 
     if boot_ok:
         print(f"    ✅ Device {device_id} booted — telemetry confirmed")
-        update_incident_fields(incident_id, stage="boot_confirmed")
+        update_incident_fields(incident_id, stage="boot_confirmed", boot_evidence=boot_evidence)
         return True
     print(f"    ❌ Boot confirmation timeout — device may have auto-rolled back")
     update_incident_fields(incident_id, stage="boot_timeout")
@@ -437,9 +542,9 @@ def _flash_and_confirm(device_id: str, incident_id: str, patched_text: str) -> b
 PATCH_MAX_ATTEMPTS = 3
 
 
-def handle_solution_1(incident: dict, verdict: dict) -> bool:
+def handle_solution_1(incident: dict, verdict: dict) -> str:
     """
-    Solution 1 — OTA patch for open-firmware devices (ESP32-CAM).
+    Solution 1 — signed firmware remediation for open-firmware ESP32 devices.
     Flow: Intel CVE context → (Hermes patch → Gate 1, retried with feedback) →
           Gate 2 → persist → [HITL flash gate] → staged build → flash → boot confirm.
 
@@ -456,7 +561,7 @@ def handle_solution_1(incident: dict, verdict: dict) -> bool:
     incident_id = incident["incident_id"]
     cve_id      = verdict.get("cve_id", "UNKNOWN")
 
-    print(f"  [SOLUTION 1] OTA patch pipeline on {device_id}")
+    print(f"  [SOLUTION 1] Signed firmware remediation pipeline on {device_id}")
     print(f"    CVE: {cve_id}")
     update_incident_fields(incident_id, stage="vuln_confirmed")
 
@@ -482,11 +587,11 @@ def handle_solution_1(incident: dict, verdict: dict) -> bool:
         print(f"    [WARN] Intel Agent unavailable ({e}) — using CVE ID only")
         cve_context = f"CVE: {cve_id}\n(Intel Agent unavailable — no additional context)"
 
-    pending_dir = Path("outputs/patches/pending")
-    failed_dir  = Path("outputs/patches/failed")
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    failed_dir.mkdir(parents=True, exist_ok=True)
-    patch_file = pending_dir / f"{incident_id}.patch"
+    paths = _incident_paths(incident_id)
+    paths["pending"].mkdir(parents=True, exist_ok=True)
+    paths["failed"].mkdir(parents=True, exist_ok=True)
+    patch_file = paths["patch"]
+    manifest = None
 
     try:
         hermes = Hermes(client=make_hermes_client())
@@ -530,7 +635,29 @@ def handle_solution_1(incident: dict, verdict: dict) -> bool:
                 continue
             return False
 
+        policy_error = _validate_patch_policy(patch_diff)
+        if policy_error:
+            print(f"    [PATCH POLICY REJECTED] {policy_error}")
+            update_incident_fields(incident_id, stage="patch_policy_failed")
+            semgrep_feedback = f"Patch policy rejected your diff: {policy_error}. Keep the fix local to the vulnerable data operation."
+            if attempt < PATCH_MAX_ATTEMPTS:
+                continue
+            _archive_failed_patch(paths, manifest)
+            return OUTCOME_FAILED
+
         patch_file.write_text(patch_diff, encoding="utf-8")
+        manifest = {
+            "schema_version": 1,
+            "incident_id": incident_id,
+            "device_id": device_id,
+            "source_path": str(firmware_src),
+            "source_sha256": _sha256_text(vulnerable_code),
+            "patched_source_sha256": _sha256_text(patched_text),
+            "patch_sha256": _sha256_file(patch_file),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "validation_status": "VALIDATING",
+        }
+        paths["manifest"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         update_incident_fields(incident_id, stage="patch_generated", patch={"diff": patch_diff})
 
         print(f"    Step 5: Gate 1 — Semgrep static analysis...")
@@ -551,86 +678,174 @@ def handle_solution_1(incident: dict, verdict: dict) -> bool:
         )
         semgrep_feedback = _format_gate1_feedback(g1)
         if attempt >= PATCH_MAX_ATTEMPTS:
-            shutil.copy2(patch_file, failed_dir / patch_file.name)
-            return False
+            _archive_failed_patch(paths, manifest)
+            return OUTCOME_FAILED
         print(f"    Retrying with Gate 1 feedback...")
 
     # ── Step 6: Gate 2 — Compile-Boot-Diff harness (on the patched source) ────
     print(f"    Step 6: Gate 2 — Compile-Boot-Diff harness...")
     update_incident_fields(incident_id, stage="gate2_running")
-    g2 = _run_gate2(patched_text)
+    g2 = _run_gate2(patched_text, incident_id)
     if not g2.get("passed"):
         print(f"    [GATE 2 REJECTED] {g2.get('stages') or g2.get('error')}")
-        shutil.copy2(patch_file, failed_dir / patch_file.name)
+        if manifest is not None:
+            manifest["gate1"] = g1
+            manifest["gate2"] = g2
+        _archive_failed_patch(paths, manifest)
         update_incident_fields(incident_id, stage="gate2_failed")
-        return False
+        return OUTCOME_FAILED
     skipped = [s["name"] for s in g2.get("stages", []) if s.get("status") == "skipped"]
     print(f"    [GATE 2 PASSED]" + (f" (skipped: {', '.join(skipped)})" if skipped else ""))
-    update_incident_fields(incident_id, stage="gate2_passed")
+    compile_stage = next((s for s in g2.get("stages", []) if s.get("name") == "compile"), {})
+    artifact_path = Path(compile_stage.get("artifact_path", ""))
+    if (not artifact_path.is_file()
+            or compile_stage.get("source_sha256") != _sha256_text(patched_text)
+            or compile_stage.get("binary_sha256") != _sha256_file(artifact_path)
+            or not isinstance(compile_stage.get("firmware_version"), str)
+            or not compile_stage.get("firmware_version")):
+        print("    [GATE 2 REJECTED] Artifact evidence does not match the patched source")
+        _archive_failed_patch(paths, manifest)
+        update_incident_fields(incident_id, stage="gate2_failed")
+        return OUTCOME_FAILED
 
-    # ── Both gates green: persist the patched firmware (original stays intact) ─
-    # main_patched.c is a DISPLAY artifact for the dashboard — it is NOT what gets
-    # built (the staged build in _staged_firmware_build writes the patch as main.c).
-    Path("esp32-cam/main/main_patched.c").write_text(patched_text, encoding="utf-8")
+    manifest.update({
+        "gate1": g1,
+        "gate2": g2,
+        "artifact_path": str(artifact_path.resolve()),
+        "binary_sha256": compile_stage["binary_sha256"],
+        "firmware_version": compile_stage["firmware_version"],
+        "validation_status": "VALIDATED",
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    paths["manifest"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    update_incident_fields(
+        incident_id, stage="awaiting_flash_approval", deployment_manifest={
+            key: manifest[key] for key in (
+                "patch_sha256", "source_sha256", "patched_source_sha256",
+                "binary_sha256", "artifact_path", "firmware_version", "validation_status",
+            )
+        },
+    )
+    print("    Patch validated and held. Approval must be bound to this exact artifact.")
+    print(f"    Approve: python -m agents.response_agent approve {incident_id} <approver>")
+    return OUTCOME_PENDING
 
-    # Signal the telemetry simulator to drop this device back to normal mode.
-    sim_state_path = Path("config/sim_state.json")
+
+def approve_flash_incident(incident_id: str, approver: str) -> bool:
+    """Bind a human approval to the exact patch, source, and firmware hashes."""
+    audit_problems = initialize_incident_audit(production=os.getenv("AES_PRODUCTION") == "1")
+    if audit_problems:
+        print("[APPROVE] Refused — incident audit verification failed: " + "; ".join(audit_problems[:3]))
+        return False
     try:
-        sim_state = json.loads(sim_state_path.read_text()) if sim_state_path.exists() else {}
-        sim_state[device_id] = "patched"
-        sim_state_path.write_text(json.dumps(sim_state, indent=2))
-        print(f"    Simulator notified — {device_id} will revert to normal traffic")
-    except Exception as e:
-        print(f"    [WARN] Could not update sim state: {e}")
-
-    # ── HITL flash gate (REVIEW P0-3) ────────────────────────────────────────
-    # Writing model-generated C to a physical device is the highest-risk action in
-    # the system, yet Gate 1's four CWE rules cannot catch semantically malicious
-    # (but statically clean) code. Require an explicit opt-in, mirroring Solution
-    # 2's AES_FIREWALL_ENFORCE and Solution 3's Discord approval.
-    if os.getenv("AES_FLASH_ENFORCE") != "1":
-        print(f"    ✅ Patch validated (Gate 1 + Gate 2) and held for approval.")
-        print(f"    To deploy: AES_FLASH_ENFORCE=1 python -m agents.response_agent flash {incident_id}")
-        update_incident_fields(incident_id, stage="awaiting_flash_approval")
-        return True
-
-    return _flash_and_confirm(device_id, incident_id, patched_text)
+        paths = _incident_paths(incident_id)
+    except ValueError as exc:
+        print(f"[APPROVE] Refused: {exc}")
+        return False
+    if not approver or len(approver) > 128 or any(ord(char) < 32 for char in approver):
+        print("[APPROVE] Refused: approver must be a printable identity (1-128 chars)")
+        return False
+    try:
+        manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"[APPROVE] No valid deployment manifest for {incident_id}")
+        return False
+    incident = _load_incident(incident_id)
+    if (not incident or manifest.get("validation_status") != "VALIDATED"
+            or incident.get("device_id") != manifest.get("device_id")
+            or not isinstance(manifest.get("firmware_version"), str)
+            or not manifest.get("firmware_version")
+            or incident.get("status") not in {"OPEN", "AWAITING_APPROVAL"}
+            or incident.get("stage") != "awaiting_flash_approval"):
+        print("[APPROVE] Incident/manifest state is not eligible for approval")
+        return False
+    try:
+        signature = _approval_signature(manifest)
+    except ValueError as exc:
+        print(f"[APPROVE] Refused: {exc}")
+        return False
+    manifest["approval"] = {
+        "approver": approver,
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "signature": signature,
+        "algorithm": "hmac-sha256",
+    }
+    manifest["validation_status"] = "APPROVED"
+    tmp = paths["manifest"].with_suffix(".manifest.json.tmp")
+    tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    os.replace(tmp, paths["manifest"])
+    update_incident_fields(incident_id, stage="approved_for_install", status="APPROVED")
+    print(f"[APPROVE] {incident_id} approved by {approver}; hashes are now bound")
+    return True
 
 
 def flash_incident(incident_id: str) -> bool:
-    """
-    Deploy a previously validated + approved patch to hardware. Reads the persisted
-    patch, re-applies it to the current firmware source, and builds+flashes it.
-    Entry point for the HITL flash gate (REVIEW P0-3):
-        AES_FLASH_ENFORCE=1 python -m agents.response_agent flash <incident_id>
-    """
+    """Install only a signed artifact carrying a valid hash-bound approval."""
     if os.getenv("AES_FLASH_ENFORCE") != "1":
         print("[FLASH] Refused — set AES_FLASH_ENFORCE=1 to write to a physical device.")
         return False
-
-    patch_file = Path("outputs/patches/pending") / f"{incident_id}.patch"
-    if not patch_file.exists():
-        print(f"[FLASH] No validated patch found at {patch_file}")
-        return False
-
-    firmware_src = _select_firmware_source()
-    if firmware_src is None:
-        print("[FLASH] Firmware source not found under esp32-cam/main/")
+    audit_problems = initialize_incident_audit(production=os.getenv("AES_PRODUCTION") == "1")
+    if audit_problems:
+        print("[FLASH] Refused — incident audit verification failed: " + "; ".join(audit_problems[:3]))
         return False
 
     try:
-        patched_text, _ = _apply_hermes_diff(
-            firmware_src.read_text(encoding="utf-8"),
-            patch_file.read_text(encoding="utf-8"),
-            firmware_src.name,
-        )
-    except ValueError as e:
-        print(f"[FLASH] Stored patch no longer applies to the current source: {e}")
+        paths = _incident_paths(incident_id)
+        manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        print(f"[FLASH] No valid approved manifest: {exc}")
+        return False
+    incident = _load_incident(incident_id)
+    if (not incident or incident.get("device_id") != manifest.get("device_id")
+            or incident.get("status") != "APPROVED"
+            or incident.get("stage") != "approved_for_install"):
+        print("[FLASH] Incident identity does not match the manifest")
+        return False
+    approval = manifest.get("approval") or {}
+    if manifest.get("validation_status") != "APPROVED":
+        print("[FLASH] Manifest has not been approved")
+        return False
+    if not isinstance(manifest.get("firmware_version"), str) or not manifest.get("firmware_version"):
+        print("[FLASH] Manifest does not bind an expected firmware version")
+        return False
+    try:
+        expected_approval = _approval_signature(manifest)
+    except ValueError as exc:
+        print(f"[FLASH] Refused: {exc}")
+        return False
+    if not hmac.compare_digest(str(approval.get("signature", "")), expected_approval):
+        print("[FLASH] Approval signature does not match this artifact")
+        return False
+    if not paths["patch"].is_file() or _sha256_file(paths["patch"]) != manifest.get("patch_sha256"):
+        print("[FLASH] Patch changed after validation")
+        return False
+    expected_artifact = paths["artifact"].resolve()
+    try:
+        manifest_artifact = Path(str(manifest.get("artifact_path", ""))).resolve(strict=True)
+    except (OSError, RuntimeError):
+        print("[FLASH] Validated artifact is missing")
+        return False
+    if manifest_artifact != expected_artifact:
+        print("[FLASH] Artifact path is not scoped to this incident")
+        return False
+    firmware_src = _select_firmware_source()
+    if firmware_src is None or _sha256_text(firmware_src.read_text(encoding="utf-8")) != manifest.get("source_sha256"):
+        print("[FLASH] Source changed after validation; regenerate and reapprove the patch")
         return False
 
-    device_id = incident_id.split("-", 3)[-1] if "-" in incident_id else incident_id
+    device_id = manifest["device_id"]
     print(f"[FLASH] Deploying approved patch for {incident_id} → {device_id}")
-    return _flash_and_confirm(device_id, incident_id, patched_text)
+    if not _flash_and_confirm(device_id, incident_id, manifest):
+        return False
+
+    manifest["validation_status"] = "DEPLOYED"
+    manifest["deployed_at"] = datetime.now(timezone.utc).isoformat()
+    paths["manifest"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    paths["deployed"].mkdir(parents=True, exist_ok=True)
+    os.replace(paths["patch"], paths["deployed_patch"])
+    os.replace(paths["manifest"], paths["deployed_manifest"])
+    update_incident_status(incident_id, "RESOLVED", incident.get("verdict"))
+    return True
 
 
 def handle_solution_2(incident: dict, verdict: dict) -> bool:
@@ -659,25 +874,7 @@ def update_incident_fields(incident_id: str, **fields):
     just once at the end — so the dashboard can show live stage-by-stage
     progress instead of only a final RESOLVED/FAILED jump.
     """
-    if not LOG_PATH.exists():
-        return
-
-    lines = LOG_PATH.read_text().strip().splitlines()
-    updated = []
-    for line in lines:
-        try:
-            entry = json.loads(line)
-            if entry.get("incident_id") == incident_id:
-                entry.update(fields)
-            updated.append(json.dumps(entry))
-        except json.JSONDecodeError:
-            updated.append(line)
-
-    # Atomic rewrite (audit finding M5): write to a temp file then replace, so a
-    # crash mid-write can never truncate or corrupt the incident log.
-    tmp = LOG_PATH.with_suffix(".jsonl.tmp")
-    tmp.write_text("\n".join(updated) + "\n")
-    os.replace(tmp, LOG_PATH)
+    update_incident_entry(incident_id, fields)
 
 
 def update_incident_status(incident_id: str, status: str, verdict: dict = None):
@@ -704,7 +901,8 @@ def respond(incident: dict, verdict: dict) -> bool:
     incident_id    = incident["incident_id"]
     device_id      = incident["device_id"]
     device_model   = incident.get("device_model", "unknown")
-    solution_track = verdict.get("solution_track", 0)
+    trusted_track = incident.get("solution_track") or (DEVICE_REGISTRY.get(device_id) or {}).get("solution_track", 0)
+    solution_track = int(trusted_track or 0)
     # Measure latency from when the anomaly was DETECTED (set by the monitor),
     # not from when respond() starts — otherwise it only times the stub handler
     # and reports ~0ms. Falls back to now if detected_at is absent.
@@ -720,8 +918,18 @@ def respond(incident: dict, verdict: dict) -> bool:
     # ── Honor Hermes's decision (audit finding H5) ────────────────────────────
     # An INVESTIGATE verdict or low confidence must NOT auto-execute a remediation
     # and report RESOLVED. Hold it for manual review instead.
-    action     = verdict.get("action", "INVESTIGATE")
-    confidence = float(verdict.get("confidence", 0.0))
+    action = verdict.get("action", "INVESTIGATE")
+    try:
+        confidence = float(verdict.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    expected_action = {1: "PATCH_OTA", 2: "BLOCK_FIREWALL", 3: "REWRITE_SKILL"}.get(solution_track)
+    if verdict.get("solution_track") != solution_track or action != expected_action:
+        print(f"  [HOLD] verdict action/track mismatch: trusted track {solution_track} requires {expected_action}")
+        action = "INVESTIGATE"
+        confidence = 0.0
     if action == "INVESTIGATE" or confidence < 0.5:
         print(f"  [HOLD] action={action} confidence={confidence:.0%} — routing to MANUAL_REVIEW")
         update_incident_status(incident_id, "MANUAL_REVIEW", verdict)
@@ -746,7 +954,7 @@ def respond(incident: dict, verdict: dict) -> bool:
         return False
 
     # ── Retry loop with exponential backoff ───────────────────────────────────
-    # Track 1 (OTA) retries the LLM+gate flow INTERNALLY with Gate 1 feedback
+    # Track 1 firmware remediation retries the LLM+gate flow INTERNALLY with Gate 1 feedback
     # (see handle_solution_1), so re-running the whole handler would just repeat
     # gate-passing work at 3× cost — one attempt is right. Track 2's failures are
     # transient (SSH/iptables), so it keeps the backoff retries. Backoff now also
@@ -755,9 +963,9 @@ def respond(incident: dict, verdict: dict) -> bool:
     for attempt in range(1, max_attempts + 1):
         try:
             print(f"\n  Attempt {attempt}/{max_attempts}...")
-            success = handler(incident, verdict)
+            outcome = handler(incident, verdict)
 
-            if success:
+            if outcome is True or outcome == OUTCOME_RESOLVED:
                 latency_ms = int((time.time() - start_time) * 1000)
                 update_incident_status(incident_id, "RESOLVED", verdict)
 
@@ -768,7 +976,7 @@ def respond(incident: dict, verdict: dict) -> bool:
                     device_model   = device_model,
                     attack         = incident.get("reason", "anomaly"),
                     cve_id         = verdict.get("cve_id", "UNKNOWN"),
-                    cvss           = f"Score: {verdict.get('confidence', 0):.0%}",
+                    cvss           = f"Score: {confidence:.0%}",
                     solution_track = solution_track,
                     action         = verdict.get("action", "UNKNOWN"),
                     gate1          = "PASS" if solution_track == 1 else "N/A",
@@ -778,6 +986,23 @@ def respond(incident: dict, verdict: dict) -> bool:
                 )
                 print(f"\n  ✅ Resolved in {latency_ms}ms — Discord alerted")
                 return True
+
+            if outcome == OUTCOME_PENDING:
+                latency_ms = int((time.time() - start_time) * 1000)
+                update_incident_fields(
+                    incident_id, status="AWAITING_APPROVAL",
+                    updated_at=datetime.now(timezone.utc).isoformat(), verdict=verdict,
+                )
+                post_incident_alert(
+                    incident_id=incident_id, device_id=device_id,
+                    device_model=device_model, attack=incident.get("reason", "anomaly"),
+                    cve_id=verdict.get("cve_id", "UNKNOWN"),
+                    cvss=f"Confidence: {confidence:.0%}", solution_track=solution_track,
+                    action=f"HELD — {action} awaiting explicit enforcement approval",
+                    latency_ms=latency_ms, status="AWAITING_APPROVAL",
+                )
+                print("  ⏸ Validated but not enforced — incident remains open for approval")
+                return False
 
             # Handler returned False (e.g. a gate rejected the patch). Back off
             # before another attempt just as we do on an exception.
@@ -814,8 +1039,14 @@ def respond(incident: dict, verdict: dict) -> bool:
 # ─── QUICK TEST / CLI ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Hash-bound human approval:
+    #   AES_DEPLOY_APPROVAL_KEY=... python -m agents.response_agent approve <incident_id> <approver>
+    if len(sys.argv) >= 4 and sys.argv[1] == "approve":
+        sys.exit(0 if approve_flash_incident(sys.argv[2], sys.argv[3]) else 1)
+
     # HITL flash gate (REVIEW P0-3): deploy a validated + approved patch.
-    #   AES_FLASH_ENFORCE=1 python -m agents.response_agent flash <incident_id>
+    #   AES_FLASH_ENFORCE=1 AES_DEPLOY_APPROVAL_KEY=... \
+    #       python -m agents.response_agent flash <incident_id>
     if len(sys.argv) >= 3 and sys.argv[1] == "flash":
         sys.exit(0 if flash_incident(sys.argv[2]) else 1)
 
@@ -834,7 +1065,7 @@ if __name__ == "__main__":
 
     test_verdict = {
         "solution_track": 1,
-        "action":         "OTA_PATCH",
+        "action":         "PATCH_OTA",
         "cve_id":         "CVE-2021-34173",
         "confidence":     0.91,
         "reasoning":      "Traffic matches Mirai C2 pattern; CVE-2021-34173 ESP32 heap overflow is the likely entry point.",
