@@ -228,7 +228,6 @@ class HITLOrchestrator:
 
         try:
             msg = self.hermes.client.messages.create(
-                model      = self.hermes.model,
                 max_tokens = 128,
                 messages   = [{"role": "user", "content": prompt}],
                 timeout    = 30.0,

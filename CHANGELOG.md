@@ -2,6 +2,31 @@
 
 Engineering history for AES — Autonomous Edge-Sentinel. Newest first.
 
+## Claude and Codex backend chains
+
+- Two new backends in `agents/llm_client.py`: `claude` (Anthropic Messages API,
+  `anthropic` SDK) and `claude-cli` (Claude Code `claude -p` with every built-in
+  tool disabled), alongside the existing `openai` and `codex` backends.
+- Reasoning (`HERMES_BACKEND`) and patch generation (`HERMES_CODE_BACKEND`) each
+  take an ordered chain, e.g. Claude first for verdicts with Codex as backup,
+  and Codex first for patches with Claude as backup. A failing backend hands the
+  request to the next; the Ollama Llama 3 fallback runs only when the whole
+  chain fails.
+- Verdicts record the backend that produced them (`verdict.backend`), and Track
+  1 patch manifests record `generated_by`.
+- A model-chosen `INVESTIGATE` verdict now keeps the model's reasoning instead of
+  being replaced by a track-mismatch message (it is still held for manual review).
+- The CLI subprocess environment now keeps `HOME`/`USER`, so CLI logins also
+  resolve on Linux and macOS (application secrets are still stripped).
+- The detector-tuning sandbox reads signed corpora from `AES_BENCHMARK_ATTACKS` /
+  `AES_BENCHMARK_NORMALS`, and `python -m skills.sandbox` re-runs the 80% / 10%
+  gate from the command line.
+- `.env.example` moved to the repository root; the dependency lock was
+  regenerated (adds `anthropic`, and bumps `certifi`, `filelock`, `httpx2`,
+  `msgpack`, `urllib3` to clear `pip-audit` findings).
+- README rewritten to describe the current pipeline, providers, fallback
+  triggers, index build, gate, tested hardware, and known limitations.
+
 ## Reasoning backend → OpenAI Responses API
 
 - Hermes' OpenAI backend uses the Responses API. Reasoning calls and firmware

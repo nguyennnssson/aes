@@ -25,6 +25,9 @@ aes_incident_events.jsonl
 aes_incident_events.head
 aes_incident_events.head.tmp
 aes_normals.jsonl
+# Operator-signed benchmark corpora (scripts/label_sample.py output)
+attack_labels.jsonl
+normal_labels.jsonl
 
 # Solution 3 runtime state (created on first inject — monitor falls back to defaults if absent)
 config/active_detection.json
