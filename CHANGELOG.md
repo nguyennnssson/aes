@@ -14,6 +14,10 @@ Engineering history for AES — Autonomous Edge-Sentinel. Newest first.
   chain fails.
 - Verdicts record the backend that produced them (`verdict.backend`), and Track
   1 patch manifests record `generated_by`.
+- The Claude Code backend runs with `--safe-mode`, so the operator's personal
+  hooks, plugins, skills, MCP servers and CLAUDE.md never run or leak into a
+  verdict. Older CLIs without the flag are refused. The Hermes system prompt is
+  passed with `--system-prompt-file` so Windows `.cmd` shims cannot mangle it.
 - A model-chosen `INVESTIGATE` verdict now keeps the model's reasoning instead of
   being replaced by a track-mismatch message (it is still held for manual review).
 - The CLI subprocess environment now keeps `HOME`/`USER`, so CLI logins also

@@ -186,36 +186,56 @@ def test_anthropic_wrapper_rejects_empty_output():
         lc._AnthropicMessages(SimpleNamespace(messages=_Msgs()), "m").create(messages=[])
 
 
-def test_claude_cli_runs_without_tools_or_secrets(monkeypatch):
-    captured = {}
+def _fake_claude(monkeypatch, help_text="  --safe-mode   Start with all customizations off",
+                 reply=" pong \n", returncode=0, stderr=""):
+    calls = []
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"], captured["kwargs"] = cmd, kwargs
-        return SimpleNamespace(returncode=0, stdout=" pong \n", stderr="")
+        if cmd[1:] == ["--help"]:
+            return SimpleNamespace(returncode=0, stdout=help_text, stderr="")
+        prompt_file = cmd[cmd.index("--system-prompt-file") + 1] if "--system-prompt-file" in cmd else None
+        calls.append({"cmd": cmd, "kwargs": kwargs,
+                      "system": open(prompt_file, encoding="utf-8").read() if prompt_file else None})
+        return SimpleNamespace(returncode=returncode, stdout=reply, stderr=stderr)
 
+    lc._CLAUDE_SAFE_MODE_SUPPORT.clear()
     monkeypatch.setattr(lc.shutil, "which", lambda exe: "/usr/bin/claude")
     monkeypatch.setattr(lc.subprocess, "run", fake_run)
+    monkeypatch.delenv("HERMES_CLAUDE_CLI_MODEL", raising=False)
+    return calls
+
+
+def test_claude_cli_runs_isolated_without_tools_or_secrets(monkeypatch):
+    calls = _fake_claude(monkeypatch)
     monkeypatch.setenv("AES_DEPLOY_APPROVAL_KEY", "secret-that-must-not-leak")
     monkeypatch.setenv("HOME", "/home/test")
-    monkeypatch.delenv("HERMES_CLAUDE_CLI_MODEL", raising=False)
 
+    system = "line one\nline \"two\" & %PATH% ^"
     result = lc.ClaudeCLIClient().messages.create(
-        system="policy", messages=[{"role": "user", "content": "ping"}], timeout=30)
+        system=system, messages=[{"role": "user", "content": "ping"}], timeout=30)
 
     assert result.content[0].text == "pong"
-    cmd = captured["cmd"]
+    call = calls[0]
+    cmd = call["cmd"]
     assert cmd[:2] == ["/usr/bin/claude", "-p"]
+    assert "--safe-mode" in cmd                          # no personal hooks/plugins/CLAUDE.md
     assert cmd[cmd.index("--tools") + 1] == ""          # every built-in tool disabled
-    assert cmd[cmd.index("--system-prompt") + 1] == "policy"
+    assert "--system-prompt" not in cmd                  # prompt never travels as an argument
+    assert call["system"] == system                      # multi-line prompt arrives intact
     assert "--strict-mcp-config" in cmd and "--no-session-persistence" in cmd
-    assert captured["kwargs"]["input"] == "ping"
-    env = captured["kwargs"]["env"]
+    assert call["kwargs"]["input"] == "ping"
+    env = call["kwargs"]["env"]
     assert "AES_DEPLOY_APPROVAL_KEY" not in env and env["HOME"] == "/home/test"
 
 
+def test_claude_cli_without_safe_mode_is_refused(monkeypatch):
+    calls = _fake_claude(monkeypatch, help_text="  --print   Print response and exit")
+    with pytest.raises(lc.ClaudeCLIError, match="no --safe-mode"):
+        lc.ClaudeCLIClient().messages.create(messages=[{"role": "user", "content": "x"}])
+    assert calls == []                                   # never ran the prompt
+
+
 def test_claude_cli_nonzero_exit_is_backend_error(monkeypatch):
-    monkeypatch.setattr(lc.shutil, "which", lambda exe: "/usr/bin/claude")
-    monkeypatch.setattr(lc.subprocess, "run",
-                        lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="", stderr="auth required"))
+    _fake_claude(monkeypatch, reply="", returncode=1, stderr="auth required")
     with pytest.raises(lc.ClaudeCLIError, match="auth required"):
         lc.ClaudeCLIClient().messages.create(messages=[{"role": "user", "content": "x"}])

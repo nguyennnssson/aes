@@ -55,7 +55,7 @@ transport, but AES does not perform OTA updates today.
 | Backend | How it authenticates | Model setting |
 |---|---|---|
 | `claude` | Anthropic Messages API, `ANTHROPIC_API_KEY` | `HERMES_CLAUDE_MODEL` (default `claude-opus-5-5`) |
-| `claude-cli` | Claude Code CLI login (`claude -p`, all tools disabled) | `HERMES_CLAUDE_CLI_MODEL` (default: CLI default) |
+| `claude-cli` | Claude Code CLI login (`claude -p --safe-mode`, all tools disabled) | `HERMES_CLAUDE_CLI_MODEL` (default: CLI default) |
 | `openai` | OpenAI Responses API, `OPENAI_API_KEY` | `HERMES_MODEL` / `HERMES_CODE_MODEL` (default `gpt-5.6-sol`) |
 | `codex` | Codex CLI login (`codex exec`, read-only sandbox) | `HERMES_CLI_MODEL` (default: CLI default) |
 
@@ -95,7 +95,11 @@ Check every configured backend with one live prompt: `python scripts/check_backe
 With `AES_PRODUCTION=1`, the CLI backends (`claude-cli`, `codex`) are skipped
 because they drive agentic tools. Set `AES_ALLOW_AGENTIC_LLM=1` only after a
 risk review. Both CLIs run in an empty temporary directory with a scrubbed
-environment, so application secrets from `.env` are never passed to them.
+environment, so application secrets from `.env` are never passed to them. They
+also ignore the operator's personal CLI setup: Codex runs with
+`--ignore-user-config --ignore-rules`, and Claude Code runs with `--safe-mode`
+(no hooks, plugins, skills, MCP servers, or CLAUDE.md). A Claude Code version
+without `--safe-mode` is refused, and the request moves to the next backend.
 
 ## Vulnerability index
 

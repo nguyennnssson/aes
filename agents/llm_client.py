@@ -9,7 +9,8 @@ so the model provider is swappable. Four backends are implemented:
                 Needs ANTHROPIC_API_KEY. Model: HERMES_CLAUDE_MODEL
                 (default `claude-opus-5-5`).
   claude-cli  — the locally installed Claude Code CLI (`claude -p`) in
-                non-interactive print mode with every built-in tool disabled.
+                non-interactive print mode with --safe-mode (no personal hooks,
+                plugins, CLAUDE.md) and every built-in tool disabled.
                 Authenticates with the user's Claude login; no key required.
                 Model: HERMES_CLAUDE_CLI_MODEL (default: the CLI's own default).
   openai      — OpenAI Responses API via the official `openai` SDK.
@@ -310,18 +311,41 @@ class CodexCLIClient:
         return f"CodexCLIClient(model={self.model!r})"
 
 
+_CLAUDE_SAFE_MODE_SUPPORT: dict = {}
+
+
+def _claude_supports_safe_mode(exe: str) -> bool:
+    """True if this `claude` binary offers --safe-mode (checked once per path)."""
+    if exe not in _CLAUDE_SAFE_MODE_SUPPORT:
+        try:
+            proc = subprocess.run(
+                [exe, "--help"], capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30, env=_cli_env(),
+            )
+            _CLAUDE_SAFE_MODE_SUPPORT[exe] = "--safe-mode" in (proc.stdout or "")
+        except (OSError, subprocess.TimeoutExpired):
+            return False   # not cached: a transient failure may succeed later
+    return _CLAUDE_SAFE_MODE_SUPPORT[exe]
+
+
 class _ClaudeCLIMessages:
     """`.messages.create(...) -> .content[0].text` over `claude -p` (Claude Code
     print mode), one non-interactive turn.
 
     Flags (checked against Claude Code 2.1.x `claude --help`):
       * `-p --output-format text` prints only the final reply.
+      * `--safe-mode` starts with every customization off: CLAUDE.md, skills,
+        plugins, hooks, MCP servers, custom commands and agents. Without it the
+        operator's personal Claude Code setup would run hooks and inject context
+        into every security verdict. A CLI without --safe-mode is refused, so
+        the chain moves on to the next backend.
       * `--tools ""` disables every built-in tool, so the call cannot run
         commands, read files, or edit anything — pure text in, text out.
       * `--strict-mcp-config` with no `--mcp-config` loads no MCP servers.
       * `--no-session-persistence` keeps nothing on disk after the call.
-      * `--system-prompt` replaces Claude Code's default agent prompt with the
-        Hermes system prompt when Hermes supplies one.
+      * `--system-prompt-file` replaces Claude Code's default agent prompt with
+        the Hermes system prompt. A file (not an argument) keeps the multi-line
+        prompt intact when Windows launches an npm `claude.cmd` shim.
     The call runs in an empty temporary directory with the scrubbed CLI env."""
 
     def __init__(self, model_override):
@@ -333,21 +357,27 @@ class _ClaudeCLIMessages:
         if not self._exe:
             raise ClaudeCLIError("claude CLI not found on PATH — install Claude Code "
                                  "(and log in) or configure another backend")
+        if not _claude_supports_safe_mode(self._exe):
+            raise ClaudeCLIError("installed claude CLI has no --safe-mode, so personal "
+                                 "hooks/plugins cannot be isolated — update Claude Code")
 
         # As with Codex, the per-call API `model` is ignored; the CLI uses
         # HERMES_CLAUDE_CLI_MODEL or its own default.
         prompt = _user_prompt(messages)
         cli_timeout = _cli_timeout(timeout)
         cmd = [
-            self._exe, "-p", "--output-format", "text", "--tools", "",
+            self._exe, "-p", "--output-format", "text", "--safe-mode", "--tools", "",
             "--strict-mcp-config", "--no-session-persistence",
         ]
-        if system:
-            cmd += ["--system-prompt", system]
         if self.model_override:
             cmd += ["--model", self.model_override]
 
         with tempfile.TemporaryDirectory(prefix="hermes-isolated-") as workspace:
+            if system:
+                prompt_file = os.path.join(workspace, "system-prompt.md")
+                with open(prompt_file, "w", encoding="utf-8") as f:
+                    f.write(system)
+                cmd += ["--system-prompt-file", prompt_file]
             try:
                 proc = subprocess.run(
                     cmd, input=prompt, capture_output=True, text=True, cwd=workspace,
