@@ -21,10 +21,14 @@ load_dotenv(_ENV_PATH)
 
 @dataclass
 class Settings:
-    # OpenAI
+    # Model backends (see agents/llm_client.py for the chain semantics)
+    hermes_backend: str       # reasoning chain, e.g. "claude-cli,codex"
+    hermes_code_backend: str  # patch-generation chain, e.g. "codex,claude-cli"
+    anthropic_api_key: str
+    claude_model: str         # Claude API model
     openai_api_key: str
-    hermes_model: str        # reasoning model
-    hermes_code_model: str   # firmware patch-generation model
+    hermes_model: str        # OpenAI reasoning model
+    hermes_code_model: str   # OpenAI firmware patch-generation model
 
     # Local Intel vector index
     intel_db_path: str
@@ -43,18 +47,15 @@ class Settings:
 def load() -> Settings:
     """Load settings from environment.
 
-    OPENAI_API_KEY is NOT strictly required: with HERMES_BACKEND=codex, Hermes runs
-    through the `codex` CLI (ChatGPT subscription auth) with no key. We only warn
-    when neither a key nor the codex backend is configured, so importing this module
-    can never crash a codex-backed process."""
-    openai_api_key = os.getenv("OPENAI_API_KEY", "")
-    backend = os.getenv("HERMES_BACKEND", "").strip().lower()
-    if not openai_api_key and backend != "codex":
-        print("[SETTINGS] Warning: no OPENAI_API_KEY and HERMES_BACKEND is not "
-              "'codex' — Hermes will fall back to the codex CLI backend if available.")
-
+    No API key is strictly required: the claude-cli and codex backends use the
+    local CLI logins, and with no usable backend Hermes falls back to local
+    Llama 3. Importing this module therefore never crashes a process."""
     return Settings(
-        openai_api_key      = openai_api_key,
+        hermes_backend      = os.getenv("HERMES_BACKEND", "auto"),
+        hermes_code_backend = os.getenv("HERMES_CODE_BACKEND", "auto"),
+        anthropic_api_key   = os.getenv("ANTHROPIC_API_KEY", ""),
+        claude_model        = os.getenv("HERMES_CLAUDE_MODEL", "claude-opus-5-5"),
+        openai_api_key      = os.getenv("OPENAI_API_KEY", ""),
         hermes_model        = os.getenv("HERMES_MODEL", "gpt-5.6-sol"),
         hermes_code_model   = os.getenv("HERMES_CODE_MODEL", "gpt-5.6-sol"),
         intel_db_path       = os.getenv("AES_INTEL_DB", "./data/aes_intel.sqlite3"),

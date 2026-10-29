@@ -11,7 +11,7 @@ cd aes
 python3.12 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.lock
-cp config/.env.example .env       # then fill in OPENAI_API_KEY (or use HERMES_BACKEND=codex)
+cp .env.example .env              # then pick backends: Claude and/or Codex/OpenAI
 ```
 
 See the [README](README.md) for the full stack (TLS Mosquitto, Ollama, the local vector index) and

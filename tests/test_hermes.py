@@ -75,3 +75,47 @@ def test_fallback_confidence_capped_below_hold_threshold(monkeypatch):
     monkeypatch.setattr(fb.subprocess, "run", lambda *a, **k: None)
     v = fb.OllamaFallback().analyze_incident("esp32-cam-01", "spike", "ctx", 1)
     assert v.confidence < 0.5   # never auto-executes: lands in respond()'s hold
+
+
+def test_verdict_records_which_backend_answered():
+    from agents.llm_client import BackendChain, ClaudeCLIError
+
+    class _Failing(_FakeClient):
+        name = "claude-cli"
+        def _create(self, **kwargs):
+            raise ClaudeCLIError("offline")
+
+    good = _FakeClient(json.dumps({"action": "PATCH_OTA", "cve_id": "CVE-2026-0001", "confidence": 0.9}))
+    good.name = "codex"
+    chain = BackendChain([_Failing("unused"), good])
+    v = Hermes(client=chain).analyze_incident("esp32-cam-01", "spike", "ctx", 1)
+    assert v.action == "PATCH_OTA"
+    assert v.backend == "codex:test-model"
+    assert v.to_dict()["backend"] == "codex:test-model"
+
+
+def test_whole_chain_failure_uses_offline_fallback(monkeypatch):
+    import agents.fallback as fb
+    from agents.llm_client import BackendChain
+
+    monkeypatch.setattr(fb.requests, "post", lambda *a, **k: (_ for _ in ()).throw(OSError("no ollama")))
+    monkeypatch.setattr(fb.subprocess, "run", lambda *a, **k: None)
+    v = Hermes(client=BackendChain([])).analyze_incident("esp32-cam-01", "spike", "ctx", 1)
+    assert v.reasoning.startswith("[OFFLINE FALLBACK]")
+    assert v.backend.startswith("ollama:") and v.confidence < 0.5
+
+
+def test_patch_generation_uses_code_client():
+    reasoning = _FakeClient("reasoning-reply")
+    code = _FakeClient("--- a/x\n+++ b/x\n")
+    h = Hermes(client=reasoning, code_client=code)
+    assert h.generate_patch("int x;", "ctx").startswith("--- a/x")
+
+
+def test_model_chosen_investigate_keeps_its_reasoning():
+    h = _hermes(json.dumps({"action": "INVESTIGATE", "cve_id": "UNKNOWN", "confidence": 0.3,
+                            "reasoning": "Intel unavailable; need packet capture first."}))
+    v = h.analyze_incident("esp32-cam-01", "spike", "INTEL UNAVAILABLE", 1)
+    assert v.action == "INVESTIGATE"
+    assert v.reasoning == "Intel unavailable; need packet capture first."
+    assert v.confidence <= 0.49

@@ -5,16 +5,21 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-print("\n=== AES Mac Studio Diagnostic ===")
+print("\n=== AES Environment Diagnostic ===")
 print(f"  Python                    {sys.version.split()[0]}")
 print(f"  Mosquitto                 {shutil.which('mosquitto') or 'NOT FOUND'}")
 print(f"  Ollama                    {shutil.which('ollama') or 'NOT FOUND'}")
+print(f"  ANTHROPIC_API_KEY         {'SET' if os.getenv('ANTHROPIC_API_KEY') else 'NOT SET'}")
+print(f"  claude CLI                {shutil.which('claude') or 'NOT FOUND'}")
 print(f"  OPENAI_API_KEY            {'SET' if os.getenv('OPENAI_API_KEY') else 'NOT SET'}")
 print(f"  codex CLI                 {shutil.which('codex') or 'NOT FOUND'}")
+print(f"  HERMES_BACKEND            {os.getenv('HERMES_BACKEND') or 'auto'}")
+print(f"  HERMES_CODE_BACKEND       {os.getenv('HERMES_CODE_BACKEND') or 'auto'}")
 
 # ── Package checks (correct imports) ─────────────────────────────────────────
 packages = {
     "paho-mqtt":  "paho.mqtt.client",
+    "anthropic":  "anthropic",
     "openai":     "openai",
     "requests":   "requests",
     "fastapi":    "fastapi",

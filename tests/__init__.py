@@ -4,6 +4,8 @@
 # Files:
 #   test_openai.py        — Smoke test for OpenAI API connectivity.
 #                           Run this first after setting OPENAI_API_KEY.
+#   (scripts/check_backends.py sends one live prompt through every configured
+#    backend — Claude API, Claude Code CLI, OpenAI API, Codex CLI.)
 #   test_hermes.py        — Unit tests for Hermes verdict hardening (action allowlist,
 #                           confidence clamp, offline-fallback cap).
 #   diagnostic.py         — environment health check: packages, services, local index count.

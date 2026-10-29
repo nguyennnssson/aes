@@ -2,7 +2,8 @@
 AES — Ollama Offline Fallback
 ==============================
 
-Activated when the OpenAI reasoning backend is unreachable (connection or timeout).
+Activated when every backend in the Hermes reasoning chain (Claude / Codex /
+OpenAI, see agents/llm_client.py) has failed.
 Exposes the same analyze_incident() signature as Hermes so the swap is transparent.
 
 Model: llama3:8b-instruct-q4_K_M via Ollama (local, never co-resident with live path)
@@ -39,9 +40,9 @@ class OllamaFallback:
     ) -> IncidentVerdict:
         """
         Same signature as Hermes.analyze_incident().
-        Called automatically by Hermes when the OpenAI backend is unreachable.
+        Called automatically by Hermes when every reasoning backend has failed.
         """
-        print(f"[FALLBACK] OpenAI backend unreachable — using local Llama 3 8B")
+        print("[FALLBACK] All reasoning backends failed — using local Llama 3 8B")
 
         prompt = (
             f"You are a security AI. Analyze this IoT attack and respond in JSON only.\n\n"
@@ -95,7 +96,8 @@ class OllamaFallback:
             # lands in respond()'s `confidence < 0.5` MANUAL_REVIEW hold rather
             # than auto-executing remediation (REVIEW P1-5).
             confidence = min(max(confidence, 0.0), 0.49),
-            reasoning      = f"[OFFLINE FALLBACK] {parsed.get('reasoning', 'OpenAI backend unreachable — local inference only')}",
+            reasoning      = f"[OFFLINE FALLBACK] {parsed.get('reasoning', 'All reasoning backends failed — local inference only')}",
+            backend        = f"ollama:{FALLBACK_MODEL}",
         )
 
     def _parse_json(self, raw: str) -> dict:

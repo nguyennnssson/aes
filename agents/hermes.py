@@ -8,18 +8,20 @@ that tells OpenClaw what to do.
 
 Hermes does NOT execute anything. OpenClaw executes. Hermes decides.
 
-Models (env-controlled, backend-swappable — see agents/llm_client.py):
-  - Reasoning (verdicts, classification, self-tuning):  HERMES_MODEL
-  - Firmware patch generation (code-in-a-loop):         HERMES_CODE_MODEL
-
-Both API roles default to gpt-5.6-sol and can be changed without code changes.
+Backends (env-controlled, see agents/llm_client.py):
+  - Reasoning (verdicts, classification, self-tuning):  HERMES_BACKEND chain
+  - Firmware patch generation (code-in-a-loop):         HERMES_CODE_BACKEND chain
+Each chain is an ordered list of Claude / Codex / OpenAI backends; a failing
+backend hands the request to the next one, and only when the whole chain fails
+does Hermes use the local Llama 3 fallback (agents/fallback.py).
 
 Usage:
     from agents.hermes import Hermes
     from agents.intel_agent import IntelAgent
     from agents.llm_client import make_hermes_client
 
-    hermes = Hermes(client=make_hermes_client())
+    hermes = Hermes(client=make_hermes_client(),
+                    code_client=make_hermes_client(role="code"))
     intel  = IntelAgent()
 
     ctx     = intel.query("ESP32-CAM", "1.0.0", result.reason)
@@ -27,32 +29,27 @@ Usage:
     respond(incident_record, verdict.to_dict())
 """
 
-import os
 import re
 import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents.llm_client import LLMBackendError
+from agents.llm_client import is_backend_error
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "hermes_system.md"
 
 
 def _is_backend_unreachable(exc: Exception) -> bool:
-    """True if `exc` means the reasoning backend is unreachable (network/timeout)
-    and Hermes should degrade to the offline Ollama fallback rather than raise.
-    Covers both the Codex CLI (LLMBackendError) and the OpenAI SDK, without making
-    `openai` a hard import for codex-only installs."""
-    if isinstance(exc, LLMBackendError):
-        return True
-    try:
-        import openai
-        # Any OpenAI SDK error (connection, timeout, auth, rate-limit, bad status)
-        # degrades to the offline fallback rather than crashing the monitor thread.
-        return isinstance(exc, openai.OpenAIError)
-    except ImportError:
-        return False
+    """True if `exc` is a backend failure (every backend in the chain failed, or a
+    provider SDK error from a bare client) and Hermes should degrade to the
+    offline Ollama fallback rather than raise."""
+    return is_backend_error(exc)
+
+
+def _answered_by(client) -> str:
+    """Name of the backend that produced the last reply (chains record it)."""
+    return str(getattr(client, "last_backend", None) or getattr(client, "model", "") or "")
 
 
 # ─── VERDICT ─────────────────────────────────────────────────────────────────
@@ -64,6 +61,7 @@ class IncidentVerdict:
     cve_id:         str    # CVE-XXXX-XXXX or UNKNOWN
     confidence:     float  # 0.0 – 1.0
     reasoning:      str    # human-readable explanation
+    backend:        str = ""   # provider:model that produced the verdict
 
     def to_dict(self) -> dict:
         """Returns the dict format expected by response_agent.respond()."""
@@ -73,6 +71,7 @@ class IncidentVerdict:
             "cve_id":         self.cve_id,
             "confidence":     self.confidence,
             "reasoning":      self.reasoning,
+            "backend":        self.backend,
         }
 
 
@@ -84,12 +83,14 @@ class Hermes:
     # held INVESTIGATE (REVIEW P0-3). Mirrors prompts/hermes_system.md.
     VALID_ACTIONS = {"PATCH_OTA", "BLOCK_FIREWALL", "REWRITE_SKILL", "INVESTIGATE"}
 
-    def __init__(self, client, model: str = None):
+    def __init__(self, client, model: str = None, code_client=None):
+        # `client` handles reasoning; `code_client` handles firmware patch
+        # generation and defaults to the reasoning client. Each backend uses its
+        # own configured model, so no model name is passed per call.
         self.client = client
-        # CLI-backend clients carry their own model; API clients use HERMES_MODEL.
-        self.model = (model or getattr(client, "model", None)
-                      or os.getenv("HERMES_MODEL", "gpt-5.6-sol"))
-        self.code_model = os.getenv("HERMES_CODE_MODEL", "gpt-5.6-sol")
+        self.code_client = code_client or client
+        self.model = model or getattr(client, "model", None) or "(unknown)"
+        self.code_model = getattr(self.code_client, "model", None) or self.model
         self._system_prompt = self._load_system_prompt()
         print(f"[HERMES] Initialized — reasoning: {self.model}, code: {self.code_model}")
 
@@ -137,7 +138,6 @@ class Hermes:
 
         try:
             msg = self.client.messages.create(
-                model=self.model,
                 max_tokens=512,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": prompt}],
@@ -145,8 +145,9 @@ class Hermes:
             )
             parsed = self._parse_json(msg.content[0].text)
         except Exception as e:
-            # A network/timeout error from the OpenAI SDK or the Codex CLI drops us
-            # to the local offline fallback rather than crashing the monitor thread.
+            # Every backend in the chain failed (or a bare client raised a provider
+            # error): drop to the local offline fallback rather than crashing the
+            # monitor thread.
             if not _is_backend_unreachable(e):
                 raise
             print(f"[HERMES] Reasoning backend unreachable ({e}) — switching to offline fallback")
@@ -158,6 +159,8 @@ class Hermes:
                 solution_track=solution_track,
             )
 
+        backend = _answered_by(self.client)
+
         if not parsed:
             # Parse failed entirely — surface it instead of masquerading as a
             # confident INVESTIGATE verdict (audit finding M1). H5 gate holds it.
@@ -167,6 +170,7 @@ class Hermes:
                 cve_id         = "UNKNOWN",
                 confidence     = 0.0,
                 reasoning      = "Hermes response was not valid JSON — held for manual review.",
+                backend        = backend,
             )
 
         # Allowlist the action (REVIEW P0-3): a prompt-injected verdict could name
@@ -181,16 +185,20 @@ class Hermes:
                 cve_id         = parsed.get("cve_id", "UNKNOWN"),
                 confidence     = 0.0,
                 reasoning      = f"Rejected unrecognized action {action!r} — held for manual review.",
+                backend        = backend,
             )
 
         expected_action = {1: "PATCH_OTA", 2: "BLOCK_FIREWALL", 3: "REWRITE_SKILL"}.get(solution_track)
-        if action != expected_action:
+        # INVESTIGATE is always allowed: it is the model choosing not to act, and
+        # respond() holds it for manual review. Keep its reasoning for the operator.
+        if action not in (expected_action, "INVESTIGATE"):
             return IncidentVerdict(
                 solution_track=solution_track,
                 action="INVESTIGATE",
                 cve_id="UNKNOWN",
                 confidence=0.0,
                 reasoning=f"Action {action!r} does not match trusted solution track {solution_track}.",
+                backend=backend,
             )
 
         try:
@@ -217,6 +225,7 @@ class Hermes:
             cve_id         = cve_id,
             confidence     = confidence,
             reasoning      = str(parsed.get("reasoning", ""))[:2000],
+            backend        = backend,
         )
 
     def generate_patch(
@@ -252,8 +261,7 @@ class Hermes:
             .replace("{surrounding_context}", surrounding_context)
         )
 
-        msg = self.client.messages.create(
-            model=self.code_model,
+        msg = self.code_client.messages.create(
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
             timeout=60.0,   # patch generation is larger — give it more headroom
@@ -276,7 +284,6 @@ class Hermes:
         )
 
         msg = self.client.messages.create(
-            model=self.model,
             max_tokens=10,
             system=self._system_prompt,
             messages=[{"role": "user", "content": prompt}],

@@ -329,7 +329,8 @@ def _process_incident(job: dict) -> None:
 
         # Step 3: Hermes — deep analysis
         verdict = call_hermes(incident_id, device_id, reason, intel_report)
-        print(f"\n  📋 [{device_id}] Verdict: Solution {verdict['solution_track']} | {verdict['action']}")
+        print(f"\n  📋 [{device_id}] Verdict: Solution {verdict['solution_track']} | {verdict['action']}"
+              f" | by {verdict.get('backend') or 'unknown backend'}")
         update_incident_fields(incident_id, verdict=verdict, stage="hermes_done")
 
         # Step 4: Response Agent — route verdict → execute → Discord alert
