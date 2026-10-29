@@ -6,6 +6,6 @@
 #   monitor_agent_mqtt.py — MQTT subscriber wrapper. Keep this running continuously.
 #   response_agent.py     — Routes Hermes verdicts to Solution 1/2/3 handlers.
 #   hermes.py             — allowlisted reasoning and firmware-patch orchestration.
-#   llm_client.py         — Backend factory: OpenAI Responses API or isolated Codex CLI.
+#   llm_client.py         — Backend chains: Claude (API / Claude Code CLI), OpenAI API, Codex CLI.
 #   intel_agent.py        — local SQLite vector-index query wrapper.
-#   fallback.py           — Ollama offline fallback when the OpenAI backend is unreachable.
+#   fallback.py           — Ollama offline fallback when every reasoning backend fails.

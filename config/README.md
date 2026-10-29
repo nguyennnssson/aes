@@ -29,4 +29,4 @@ Single source of truth for the device fleet. Every component loads from this fil
 
 Copy `.env.example` to `.env` and fill in your keys. Never commit `.env`.
 
-Required keys: see `.env.example` at repo root.
+All keys are documented in `.env.example` at the repository root.

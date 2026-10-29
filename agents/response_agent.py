@@ -594,7 +594,9 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
     manifest = None
 
     try:
-        hermes = Hermes(client=make_hermes_client())
+        # Patch generation uses the HERMES_CODE_BACKEND chain (e.g. Codex first,
+        # Claude as backup); see agents/llm_client.py.
+        hermes = Hermes(client=make_hermes_client(role="code"))
     except Exception as e:
         print(f"    [ERROR] Could not initialize Hermes: {e}")
         return False
@@ -654,11 +656,13 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
             "source_sha256": _sha256_text(vulnerable_code),
             "patched_source_sha256": _sha256_text(patched_text),
             "patch_sha256": _sha256_file(patch_file),
+            "generated_by": getattr(hermes.code_client, "last_backend", None),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "validation_status": "VALIDATING",
         }
         paths["manifest"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        update_incident_fields(incident_id, stage="patch_generated", patch={"diff": patch_diff})
+        update_incident_fields(incident_id, stage="patch_generated",
+                               patch={"diff": patch_diff, "generated_by": manifest["generated_by"]})
 
         print(f"    Step 5: Gate 1 — Semgrep static analysis...")
         update_incident_fields(incident_id, stage="gate1_running")
@@ -667,14 +671,16 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
             print(f"    [GATE 1 PASSED]")
             update_incident_fields(
                 incident_id, stage="gate1_passed",
-                patch={"diff": patch_diff, "gates": _gate1_results(g1)},
+                patch={"diff": patch_diff, "gates": _gate1_results(g1),
+                       "generated_by": manifest["generated_by"]},
             )
             break
 
         print(f"    [GATE 1 REJECTED] {g1.get('failures') or g1.get('error')}")
         update_incident_fields(
             incident_id, stage="gate1_failed",
-            patch={"diff": patch_diff, "gates": _gate1_results(g1)},
+            patch={"diff": patch_diff, "gates": _gate1_results(g1),
+                   "generated_by": manifest["generated_by"]},
         )
         semgrep_feedback = _format_gate1_feedback(g1)
         if attempt >= PATCH_MAX_ATTEMPTS:

@@ -2,7 +2,9 @@
 # deployments install the fully resolved requirements.lock generated through
 # requirements-dev.txt. ESP-IDF/esptool is installed separately in the hardware
 # workstation toolchain so its platform-specific cryptography constraints do
-# not enter the network-service environment.
+# not enter the network-service environment. Semgrep (Gate 1) is likewise
+# installed in its own venv at .tools/semgrep-venv (see gates/semgrep/gate1.py).
+anthropic==2.3.0
 openai==3.1.0
 paho-mqtt==2.1.0
 requests==2.34.2
