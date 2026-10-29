@@ -2,6 +2,13 @@
 
 Engineering history for AES — Autonomous Edge-Sentinel. Newest first.
 
+## Web dependency security update
+
+- Next.js 16.3.1 → 16.4.3 and `npm audit fix` (sharp, source-map-js) to clear
+  critical/high advisories published after the last release, including several
+  unauthenticated remote-code-execution issues in Next.js. CI's
+  `npm audit --omit=dev --audit-level=high` gate is green again.
+
 ## Repository cleanup
 
 - Removed internal audit IDs ("REVIEW P0-3", "audit finding C4") from code
