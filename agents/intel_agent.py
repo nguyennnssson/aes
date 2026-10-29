@@ -43,7 +43,7 @@ class IntelAgent:
             device_model:     e.g. "ESP32-CAM"
             firmware_version: e.g. "1.0.0" — narrows results to device-specific CVEs
             attack_signature: e.g. "CPU spike + outbound TCP 23"
-            top_k:            max chunks to return (default 10 per architecture spec)
+            top_k:            max chunks to return (default 5)
 
         Returns:
             IntelContext with formatted string ready to inject into Hermes prompt.
@@ -52,7 +52,7 @@ class IntelAgent:
 
         # The embedded vector index query depends on a live Ollama embedder.
         # If either is unreachable, degrade gracefully — Hermes can still reason
-        # from the anomaly alone. NEVER raise into the incident pipeline (H2):
+        # from the anomaly alone. NEVER raise into the incident pipeline:
         # an exception here would otherwise crash on_message and strand the device.
         try:
             collection = get_collection()
@@ -111,7 +111,7 @@ def format_context(query: str, chunks: list[dict]) -> str:
     Formats CVE chunks for injection into Hermes prompt.
     Header uses metadata the ingest pipeline actually stores (severity + CVSS
     score). The old 'Confidence' field was never populated and always rendered
-    '?' (audit finding M2).
+    '?'.
     [Source: {source} | CVE: {cve_id} | Severity: {severity} ({score})] {chunk_text}
     Separated by \\n---\\n
     """

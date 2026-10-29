@@ -36,7 +36,7 @@ check "agents.monitor_agent"      python3 -c 'from agents.monitor_agent import M
 check "agents.monitor_agent_mqtt" python3 -c 'from agents.monitor_agent_mqtt import *'
 check "agents.response_agent"     python3 -c 'from agents.response_agent import respond'
 check "discord.discord_alerts"    python3 -c 'from discord.discord_alerts import post_incident_alert'
-check "local Intel query"         python3 -c 'from rag.query_chromadb import query_intel'
+check "local Intel query"         python3 -c 'from rag.query_index import query_intel'
 
 echo ""
 echo "── Diagnostic ───────────────────────────"

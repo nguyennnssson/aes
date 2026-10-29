@@ -57,8 +57,6 @@ def record(label, passed, detail=""):
 def test_broker_connect():
     print("\nT1  MQTT broker connectivity (localhost:1883)")
     try:
-        import paho.mqtt.client as mqtt
-
         connected = threading.Event()
         rc_box = [None]
 
@@ -106,7 +104,7 @@ def test_broker_connect():
 # ---------------------------------------------------------------------------
 def test_receiver_logic():
     print("\nT2  Receiver on_message logic (direct call, no broker)")
-    import importlib.util, pathlib
+    import importlib.util
 
     receiver_path = os.path.join(REPO_ROOT, "raspberry-pi", "receiver.py")
     spec = importlib.util.spec_from_file_location("receiver", receiver_path)
@@ -177,8 +175,6 @@ def test_mqtt_roundtrip(broker_ok):
         results.append((None, f"  {SKIP} MQTT round-trip (broker not reachable)"))
         print(f"  {SKIP} MQTT round-trip (broker not reachable)")
         return
-
-    import paho.mqtt.client as mqtt
 
     received_files_before = set(
         f for f in os.listdir(DEVICE_DIR) if f.endswith(".json") and f not in ("sample.json",)

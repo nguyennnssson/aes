@@ -71,26 +71,24 @@ class Sandbox:
         """
         print(f"[SANDBOX] Benchmarking {skill.skill_id} with params={skill.params}...")
 
-        # Attacks: every logged incident is a confirmed anomaly. Exclude fabricated
-        # demo incidents (stamped "demo": true by scripts/live_demo.py) so staged
-        # theater data doesn't contaminate the real detection-rate measurement
-        # (REVIEW P1-6). NOTE: detection_rate here is measured over PREVIOUSLY
-        # DETECTED incidents only, so it proves "no regression," not "catches what
-        # we previously missed" — the stealth before/after demo is the evidence for
-        # the latter (a missed attack cannot appear in this corpus by construction).
+        # Attacks: only operator-signed ATTACK samples count. Demo incidents
+        # (stamped "demo": true by scripts/live_demo.py) are always excluded so
+        # staged data can never reach the detection-rate measurement. If the
+        # corpus is built from logged incidents, detection_rate covers attacks the
+        # detector already caught: it proves "no regression", not "catches what we
+        # previously missed".
         all_incidents = self._load_jsonl(self.incidents_path)
         attacks = [a for a in all_incidents if not a.get("demo") and self._trusted_label(a, "ATTACK")]
         excluded = len(all_incidents) - len(attacks)
         if excluded:
-            print(f"[SANDBOX] Excluded {excluded} demo incident(s) from the attack corpus")
-        # Normals: sampled NORMAL readings (status guard keeps this honest if the
-        # files ever share a path).
+            print(f"[SANDBOX] Excluded {excluded} demo or unsigned sample(s) from the attack corpus")
+        # Normals: only operator-signed NORMAL samples count.
         normals = [n for n in self._load_jsonl(self.normals_path) if self._trusted_label(n, "NORMAL")]
 
         print(f"[SANDBOX] {len(attacks)} attack incidents, {len(normals)} normal readings")
         if not normals:
             # Without normals the FP gate cannot fail — refuse to certify a skill
-            # on attack-only data rather than rubber-stamp it (audit finding C4).
+            # on attack-only data rather than rubber-stamp it.
             print("[SANDBOX] ⚠ No normal readings yet — run the simulator in normal mode "
                   "to build a false-positive corpus before approving skills.")
 
@@ -109,7 +107,7 @@ class Sandbox:
         )
         skill.benchmark = result
 
-        # passed() enforces the normal-corpus requirement (audit finding C4).
+        # passed() enforces the normal-corpus requirement.
         status = "PASS ✅" if result.passed(MIN_DETECTION_RATE, MAX_FALSE_POSITIVE) else "FAIL ❌"
         print(f"[SANDBOX] {status} — {result.summary()}")
         return result

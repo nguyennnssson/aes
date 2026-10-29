@@ -33,13 +33,12 @@ No API key needed. No Mac Studio needed. Pure Python.
 
 import json
 import os
-import time
 import hashlib
 import hmac
 import math
 import threading
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
@@ -83,7 +82,7 @@ PARAM_BOUNDS = {
 def validate_detection_params(raw: dict) -> dict:
     """Keep only known keys, coerce types, and clamp to PARAM_BOUNDS. Junk values
     are dropped rather than raised — a corrupt params file must never crash the
-    monitor (REVIEW P2-16)."""
+    monitor."""
     out = {}
     if not isinstance(raw, dict):
         return out
@@ -166,7 +165,7 @@ class Telemetry:
             errors.append(f"connection_count out of range: {self.connection_count}")
         # Security: device_id must be non-empty and alphanumeric + hyphens only
         # (no injection). `all()` over an empty string is vacuously True, so the
-        # emptiness check must be explicit (REVIEW P2-16).
+        # emptiness check must be explicit.
         if (not isinstance(self.device_id, str) or not self.device_id or len(self.device_id) > 64
                 or not all(c.isascii() and (c.isalnum() or c == '-') for c in self.device_id)):
             errors.append(f"device_id invalid or empty: {self.device_id!r}")
@@ -314,7 +313,7 @@ class MonitorAgent:
             }
             _BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
             # Atomic write (tmp + replace) so a crash mid-write can't truncate the
-            # committed pre-seeded baseline (REVIEW P2-14).
+            # committed pre-seeded baseline.
             tmp = _BASELINE_PATH.with_suffix(".json.tmp")
             with open(tmp, "w") as f:
                 json.dump(existing, f, indent=2)
@@ -611,7 +610,7 @@ def _incident_core(entry: dict) -> str:
     """
     Canonical string of the IMMUTABLE detection facts — the basis for the
     tamper-evident hash. Excludes mutable fields (status, resolved_at, verdict)
-    so resolving an incident later doesn't invalidate its hash (audit finding M5).
+    so resolving an incident later doesn't invalidate its hash.
     """
     core = {k: entry.get(k) for k in ("incident_id", "timestamp", "device_id", "deviations")}
     return json.dumps(core, sort_keys=True)
@@ -621,7 +620,7 @@ def verify_incident_log() -> list:
     """
     Recompute each incident's immutable-core hash and compare against the ledger.
     Returns a list of problems (empty list = log intact). This is the verifier
-    the hash ledger never had (audit finding M5).
+    the hash ledger never had.
 
     Run: python -c "from agents.monitor_agent import verify_incident_log as v; print(v() or 'OK')"
     """
@@ -709,7 +708,7 @@ def verify_incident_log() -> list:
         elif hashlib.sha256(_incident_core(entry).encode()).hexdigest() != expected:
             problems.append(f"{iid}: hash mismatch — tampered")
 
-    # Reverse direction (audit finding, REVIEW P1-11): an incident in the ledger
+    # Reverse direction: an incident in the ledger
     # but absent from the log was DELETED. Without this check, dropping a whole
     # log line (not just editing it) went undetected.
     for iid in ledger:

@@ -134,9 +134,9 @@ def handle(incident: dict, verdict: dict) -> str:
 
     if not enforce:
         # Safe default for dev benches: prove the whole path except the write.
-        print(f"    Step 4: ENFORCEMENT SKIPPED — AES_FIREWALL_ENFORCE is not set.")
-        print(f"            Dry-run passed; set AES_FIREWALL_ENFORCE=1 on the "
-              f"gateway to write real rules.")
+        print("    Step 4: ENFORCEMENT SKIPPED — AES_FIREWALL_ENFORCE is not set.")
+        print("            Dry-run passed; set AES_FIREWALL_ENFORCE=1 on the "
+              "gateway to write real rules.")
         update_incident_fields(incident_id, stage="awaiting_firewall_enforcement",
                                enforcement="dry_run_only")
         _audit({"device_id": device_id, "incident_id": incident_id, "ip": ip,

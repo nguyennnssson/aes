@@ -1,9 +1,12 @@
 """
-AES — Intel Agent: Query the CVE Knowledge Base
-Run this AFTER ingest_nvd.py has populated the local AES vector index.
+AES — Query the local CVE vector index from the command line.
+Run this AFTER ingest_nvd.py has populated the index:
 
-This is what fires during a real incident: takes an attack description,
-searches the local vector index for the most relevant CVEs and returns context.
+    python -m rag.query_index
+
+Takes an attack description, searches the index for the most relevant CVEs, and
+prints the context block. The live incident pipeline uses agents/intel_agent.py,
+which adds a relevance threshold and source allowlist on top of the same index.
 """
 
 from rag.vector_store import get_collection

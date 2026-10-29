@@ -52,7 +52,7 @@ class BenchmarkResult:
         Returns True if benchmark meets deployment thresholds.
         Defaults: detection >= 80%, false positive <= 10%.
         Requires a non-empty normal corpus — otherwise the FP rate is unmeasured
-        (always 0%) and the gate would be meaningless (audit finding C4).
+        (always 0%) and the gate would be meaningless.
         """
         if self.normal_sample_size <= 0 or self.attack_sample_size <= 0:
             return False

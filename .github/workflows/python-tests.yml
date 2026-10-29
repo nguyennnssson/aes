@@ -25,6 +25,9 @@ jobs:
       - name: Audit Python dependency lock
         run: pip-audit -r requirements.lock
 
+      - name: Lint (pyflakes rules)
+        run: ruff check --select F --exclude web,.tools .
+
       - name: Run unit tests
         run: pytest tests/ -q
 

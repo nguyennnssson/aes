@@ -84,8 +84,3 @@ data/telemetry/**/*.json
 
 # pytest
 .pytest_cache/
-
-# Internal docs kept LOCAL-ONLY (removed from the public repo & history)
-/business/
-/REVIEW.md
-/PLAN_FOR_OPUS.md

@@ -32,16 +32,13 @@ Usage:
 """
 
 import json
-import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 
 from agents.hermes import Hermes
-from agents.intel_agent import IntelAgent
 from discord.discord_alerts import post_learning_update
-from skills.schema import Skill, APPROVED, PENDING_HITL
+from skills.schema import Skill, PENDING_HITL
 from skills.sandbox import Sandbox
 from skills.store import SkillStore
 from skills.inject import Injector
@@ -142,7 +139,7 @@ class HITLOrchestrator:
         # before approval. A stale or locally edited benchmark record can never
         # be converted into an approval signature.
         if not self.sandbox.benchmark(skill).passed():
-            print(f"[HITL] Approval refused: current authenticated benchmark failed")
+            print("[HITL] Approval refused: current authenticated benchmark failed")
             return False
         try:
             skill.approve(approved_by)
@@ -242,7 +239,7 @@ class HITLOrchestrator:
     def _validate_params(self, raw: dict) -> dict:
         """Keep only known keys, coerce types, and clamp to safe bounds. Delegates
         to the shared validator so the live monitor and the learning loop agree on
-        the exact bounds (REVIEW P2-16)."""
+        the exact bounds."""
         from agents.monitor_agent import validate_detection_params
         return validate_detection_params(raw)
 

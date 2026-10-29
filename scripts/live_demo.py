@@ -18,7 +18,7 @@ import os
 import random
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -276,7 +276,7 @@ def write_incidents(extra=None):
     if extra:
         rows.append(extra)
     # Stamp every fabricated theater incident so the skill sandbox can exclude
-    # them from its real attack corpus (REVIEW P1-6).
+    # them from its real attack corpus.
     for r in rows:
         r["demo"] = True
     INCIDENTS.write_text("\n".join(json.dumps(r) for r in rows) + "\n")

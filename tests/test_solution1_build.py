@@ -1,5 +1,5 @@
 """
-Unit tests for the Solution 1 manifest-bound flash gate (REVIEW P0-1, P0-3).
+Unit tests for the Solution 1 manifest-bound flash gate.
 Verifies insecure global build reuse is gone and flashing is held behind
 AES_FLASH_ENFORCE.
 Run: pytest tests/test_solution1_build.py

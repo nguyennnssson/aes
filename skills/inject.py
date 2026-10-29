@@ -6,7 +6,7 @@ Owner: Son Nguyen (AI Infra)
 Deploys an APPROVED skill (a set of EWMA detection params) by writing it to
 config/active_detection.json. The live monitor process polls that file's mtime
 and adopts the new params on its next reading — no restart, no importlib.reload,
-no cross-process module surgery (audit findings C1, C2).
+no cross-process module surgery.
 
 HOW IT WORKS:
   1. Back up current active_detection.json → previous_detection.json
