@@ -50,6 +50,10 @@ transport, but AES does not perform OTA updates today.
 
 ## Model providers
 
+"Hermes" (`agents/hermes.py`) and "OpenClaw" (`openclaw/`) are this project's
+names for its reasoning and execution layers. They are plain Python modules and
+do not use the external Hermes Agent or OpenClaw frameworks.
+
 `agents/llm_client.py` implements four backends behind one interface:
 
 | Backend | How it authenticates | Model setting |

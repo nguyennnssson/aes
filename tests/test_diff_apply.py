@@ -1,6 +1,6 @@
 """
 Unit tests for _apply_hermes_diff — the hunk-by-hunk diff re-applier that tolerates
-Hermes' wrong @@ counts, truncated context, and markdown fences (REVIEW P1-10).
+Hermes' wrong @@ counts, truncated context, and markdown fences.
 Run: pytest tests/test_diff_apply.py
 """
 import pytest

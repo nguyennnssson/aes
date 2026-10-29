@@ -16,7 +16,6 @@ import csv
 import io
 import json
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -315,7 +314,7 @@ def ingest_espressif() -> tuple[int, int]:
 def main():
     print("=" * 60)
     print("AES — RAG Ingestion Pipeline")
-    print(f"Sources: NVD | Exploit-DB | ICS-CERT | Espressif")
+    print("Sources: NVD | Exploit-DB | ICS-CERT | Espressif")
     print(f"DB before: {collection.count()} documents")
     print("=" * 60)
 

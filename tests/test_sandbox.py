@@ -1,6 +1,6 @@
 """
 Unit tests for the skill sandbox + injector: FP-gate honesty, demo-incident
-exclusion, and injector status enforcement (REVIEW P1-6, P2-16).
+exclusion, and injector status enforcement.
 Run: pytest tests/test_sandbox.py
 """
 import hashlib

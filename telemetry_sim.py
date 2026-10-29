@@ -278,8 +278,8 @@ def main():
     if stealthing:
         print(f"[SIM] STEALTH mode on: {list(stealthing)}")
     if not attacking and not stealthing:
-        print(f"[SIM] All devices in NORMAL mode")
-    print(f"[SIM] Press Ctrl+C to stop\n")
+        print("[SIM] All devices in NORMAL mode")
+    print("[SIM] Press Ctrl+C to stop\n")
 
     tick = 0
     try:

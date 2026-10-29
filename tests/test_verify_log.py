@@ -1,5 +1,5 @@
 """
-Unit tests for verify_incident_log — must catch edits AND deletions (REVIEW P1-11).
+Unit tests for verify_incident_log — must catch edits AND deletions.
 Run: pytest tests/test_verify_log.py
 """
 import hashlib

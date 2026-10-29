@@ -1,14 +1,13 @@
 """
-Unit tests for Hermes verdict hardening: action allowlist + confidence clamp
-(REVIEW P0-3) and the offline-fallback confidence cap (REVIEW P1-5).
+Unit tests for Hermes verdict hardening: action allowlist, confidence clamp,
+offline-fallback confidence cap, and backend attribution.
 Run: pytest tests/test_hermes.py
 """
 import json
 from types import SimpleNamespace
 
-import pytest
 
-from agents.hermes import Hermes, IncidentVerdict
+from agents.hermes import Hermes
 
 
 class _FakeClient:

@@ -1,9 +1,8 @@
 """
 AES — Response Agent
 ====================
-Owner: Son Nguyen (AI Infra) — routing logic
-       Duc Vu (Pipeline)     — Solution 1/2 execution (replace stubs below)
-Moved to: agents/response_agent.py
+Owners: Son Nguyen (AI Infra) — routing logic
+        Duc Vu (Pipeline)     — Solution 1/2 execution
 
 WHAT IT DOES:
   Takes a Hermes verdict and routes it to the right solution handler.
@@ -317,7 +316,7 @@ def _gate1_results(g1: dict) -> list:
 # Bench firmware source selection. Prefer main_vulnerable.c (demo mode with an
 # intentional CWE-119) ONLY when AES_ALLOW_VULN_SOURCE=1 — otherwise always patch
 # the production main.c. This stops a stray main_vulnerable.c from silently
-# becoming the patch base in production (REVIEW P2-16).
+# becoming the patch base in production.
 def _select_firmware_source() -> Path | None:
     if os.getenv("AES_ALLOW_VULN_SOURCE") == "1":
         vuln = Path("esp32-cam/main/main_vulnerable.c")
@@ -454,13 +453,13 @@ def _flash_and_confirm(device_id: str, incident_id: str, manifest: dict) -> bool
             print(f"    [ERROR] Flash failed:\n{flash.stderr[-500:]}")
             update_incident_fields(incident_id, stage="flash_failed")
             return False
-        print(f"    Flash complete")
+        print("    Flash complete")
     except FileNotFoundError:
         print("    [ERROR] ESP-IDF flashing tool disappeared before deployment")
         update_incident_fields(incident_id, stage="flash_failed")
         return False
     except subprocess.TimeoutExpired:
-        print(f"    [ERROR] Flash timed out after 120s")
+        print("    [ERROR] Flash timed out after 120s")
         update_incident_fields(incident_id, stage="flash_failed")
         return False
 
@@ -533,7 +532,7 @@ def _flash_and_confirm(device_id: str, incident_id: str, manifest: dict) -> bool
         print(f"    ✅ Device {device_id} booted — telemetry confirmed")
         update_incident_fields(incident_id, stage="boot_confirmed", boot_evidence=boot_evidence)
         return True
-    print(f"    ❌ Boot confirmation timeout — device may have auto-rolled back")
+    print("    ❌ Boot confirmation timeout — device may have auto-rolled back")
     update_incident_fields(incident_id, stage="boot_timeout")
     return False
 
@@ -549,7 +548,7 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
           Gate 2 → persist → [HITL flash gate] → staged build → flash → boot confirm.
 
     Never flashes without Gate 1 AND Gate 2 green. The physical flash is gated
-    behind AES_FLASH_ENFORCE=1 (REVIEW P0-3): by default the validated patch is
+    behind AES_FLASH_ENFORCE=1: by default the validated patch is
     persisted and held at stage=awaiting_flash_approval for human review — flash
     it with `python -m agents.response_agent flash <incident_id>`.
     """
@@ -568,13 +567,13 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
     # ── Step 1: Read the firmware source to patch ────────────────────────────
     firmware_src = _select_firmware_source()
     if firmware_src is None:
-        print(f"    [ERROR] Firmware source not found under esp32-cam/main/")
+        print("    [ERROR] Firmware source not found under esp32-cam/main/")
         return False
     vulnerable_code = firmware_src.read_text(encoding="utf-8")
     print(f"    Step 1: Loaded firmware source {firmware_src.name} ({len(vulnerable_code)} chars)")
 
     # ── Step 2: Re-query Intel Agent for CVE context (once) ──────────────────
-    print(f"    Step 2: Querying Intel Agent for CVE context...")
+    print("    Step 2: Querying Intel Agent for CVE context...")
     try:
         intel = IntelAgent()
         ctx = intel.query(
@@ -602,7 +601,7 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
         return False
 
     # ── Steps 3-5: generate → apply → Gate 1, retried with Semgrep feedback ───
-    # (REVIEW P1-4) Each retry passes the previous Gate 1 findings into the prompt's
+    # Each retry passes the previous Gate 1 findings into the prompt's
     # {semgrep_output} slot, so Hermes actually corrects the flagged code instead
     # of re-emitting the same rejected patch at full LLM cost.
     semgrep_feedback = "None — first attempt"
@@ -628,7 +627,7 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
             patched_text, patch_diff = _apply_hermes_diff(
                 vulnerable_code, raw_diff, firmware_src.name
             )
-            print(f"    Diff reformatted with correct line counts")
+            print("    Diff reformatted with correct line counts")
         except ValueError as e:
             print(f"    [ERROR] Could not apply Hermes diff: {e}")
             update_incident_fields(incident_id, stage="patch_failed")
@@ -664,11 +663,11 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
         update_incident_fields(incident_id, stage="patch_generated",
                                patch={"diff": patch_diff, "generated_by": manifest["generated_by"]})
 
-        print(f"    Step 5: Gate 1 — Semgrep static analysis...")
+        print("    Step 5: Gate 1 — Semgrep static analysis...")
         update_incident_fields(incident_id, stage="gate1_running")
         g1 = _run_gate1(patched_text, firmware_src.name)
         if g1.get("passed"):
-            print(f"    [GATE 1 PASSED]")
+            print("    [GATE 1 PASSED]")
             update_incident_fields(
                 incident_id, stage="gate1_passed",
                 patch={"diff": patch_diff, "gates": _gate1_results(g1),
@@ -686,10 +685,10 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
         if attempt >= PATCH_MAX_ATTEMPTS:
             _archive_failed_patch(paths, manifest)
             return OUTCOME_FAILED
-        print(f"    Retrying with Gate 1 feedback...")
+        print("    Retrying with Gate 1 feedback...")
 
     # ── Step 6: Gate 2 — Compile-Boot-Diff harness (on the patched source) ────
-    print(f"    Step 6: Gate 2 — Compile-Boot-Diff harness...")
+    print("    Step 6: Gate 2 — Compile-Boot-Diff harness...")
     update_incident_fields(incident_id, stage="gate2_running")
     g2 = _run_gate2(patched_text, incident_id)
     if not g2.get("passed"):
@@ -701,7 +700,7 @@ def handle_solution_1(incident: dict, verdict: dict) -> str:
         update_incident_fields(incident_id, stage="gate2_failed")
         return OUTCOME_FAILED
     skipped = [s["name"] for s in g2.get("stages", []) if s.get("status") == "skipped"]
-    print(f"    [GATE 2 PASSED]" + (f" (skipped: {', '.join(skipped)})" if skipped else ""))
+    print("    [GATE 2 PASSED]" + (f" (skipped: {', '.join(skipped)})" if skipped else ""))
     compile_stage = next((s for s in g2.get("stages", []) if s.get("name") == "compile"), {})
     artifact_path = Path(compile_stage.get("artifact_path", ""))
     if (not artifact_path.is_file()
@@ -921,7 +920,7 @@ def respond(incident: dict, verdict: dict) -> bool:
     print(f"  CVE:      {verdict.get('cve_id', 'UNKNOWN')}")
     print(f"  Reason:   {verdict.get('reasoning', '')}")
 
-    # ── Honor Hermes's decision (audit finding H5) ────────────────────────────
+    # ── Honor Hermes's decision ────────────────────────────
     # An INVESTIGATE verdict or low confidence must NOT auto-execute a remediation
     # and report RESOLVED. Hold it for manual review instead.
     action = verdict.get("action", "INVESTIGATE")
@@ -964,7 +963,7 @@ def respond(incident: dict, verdict: dict) -> bool:
     # (see handle_solution_1), so re-running the whole handler would just repeat
     # gate-passing work at 3× cost — one attempt is right. Track 2's failures are
     # transient (SSH/iptables), so it keeps the backoff retries. Backoff now also
-    # applies to a handler that returns False, not only one that raises (P1-4).
+    # applies to a handler that returns False, not only one that raises.
     max_attempts = 1 if solution_track == 1 else MAX_RETRIES
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1050,7 +1049,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "approve":
         sys.exit(0 if approve_flash_incident(sys.argv[2], sys.argv[3]) else 1)
 
-    # HITL flash gate (REVIEW P0-3): deploy a validated + approved patch.
+    # HITL flash gate: deploy a validated + approved patch.
     #   AES_FLASH_ENFORCE=1 AES_DEPLOY_APPROVAL_KEY=... \
     #       python -m agents.response_agent flash <incident_id>
     if len(sys.argv) >= 3 and sys.argv[1] == "flash":

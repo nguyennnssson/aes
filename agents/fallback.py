@@ -94,7 +94,7 @@ class OllamaFallback:
             cve_id         = cve_id,
             # Cap confidence at 0.49 so a degraded (local Llama) verdict ALWAYS
             # lands in respond()'s `confidence < 0.5` MANUAL_REVIEW hold rather
-            # than auto-executing remediation (REVIEW P1-5).
+            # than auto-executing remediation.
             confidence = min(max(confidence, 0.0), 0.49),
             reasoning      = f"[OFFLINE FALLBACK] {parsed.get('reasoning', 'All reasoning backends failed — local inference only')}",
             backend        = f"ollama:{FALLBACK_MODEL}",

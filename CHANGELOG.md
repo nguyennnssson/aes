@@ -2,6 +2,18 @@
 
 Engineering history for AES — Autonomous Edge-Sentinel. Newest first.
 
+## Repository cleanup
+
+- Removed internal audit IDs ("REVIEW P0-3", "audit finding C4") from code
+  comments; they pointed to documents that are not part of this repository.
+- Corrected stale module descriptions (`openclaw/`, `rag/`, response agent
+  header, Intel agent `top_k` default) and renamed `rag/query_chromadb.py` to
+  `rag/query_index.py` (the index is SQLite, not ChromaDB).
+- Clarified that "Hermes" and "OpenClaw" are this project's layer names and do
+  not use the external frameworks of the same names.
+- Fixed all pyflakes findings (unused imports, placeholder-free f-strings) and
+  added a `ruff check --select F` step to CI.
+
 ## Claude and Codex backend chains
 
 - Two new backends in `agents/llm_client.py`: `claude` (Anthropic Messages API,

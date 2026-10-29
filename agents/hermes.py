@@ -7,6 +7,8 @@ queries CVE context via Intel Agent, and returns a structured verdict
 that tells OpenClaw what to do.
 
 Hermes does NOT execute anything. OpenClaw executes. Hermes decides.
+("Hermes" and "OpenClaw" are this project's names for its reasoning and
+execution layers; neither uses the external Hermes Agent or OpenClaw frameworks.)
 
 Backends (env-controlled, see agents/llm_client.py):
   - Reasoning (verdicts, classification, self-tuning):  HERMES_BACKEND chain
@@ -80,7 +82,7 @@ class IncidentVerdict:
 class Hermes:
 
     # The only remediation verbs Hermes may emit; anything else is coerced to a
-    # held INVESTIGATE (REVIEW P0-3). Mirrors prompts/hermes_system.md.
+    # held INVESTIGATE. Mirrors prompts/hermes_system.md.
     VALID_ACTIONS = {"PATCH_OTA", "BLOCK_FIREWALL", "REWRITE_SKILL", "INVESTIGATE"}
 
     def __init__(self, client, model: str = None, code_client=None):
@@ -122,7 +124,7 @@ class Hermes:
         """
         # The intel context is retrieved from public CVE feeds (NVD / Exploit-DB)
         # whose text is attacker-submittable, so it is fenced and explicitly marked
-        # untrusted (REVIEW P0-3). Prompt-fencing is defense-in-depth only — the
+        # untrusted. Prompt-fencing is defense-in-depth only — the
         # real controls are the action allowlist below and the HITL flash gate.
         prompt = (
             f"INCIDENT ANALYSIS REQUEST\n\n"
@@ -163,7 +165,7 @@ class Hermes:
 
         if not parsed:
             # Parse failed entirely — surface it instead of masquerading as a
-            # confident INVESTIGATE verdict (audit finding M1). H5 gate holds it.
+            # confident INVESTIGATE verdict. respond() holds it.
             return IncidentVerdict(
                 solution_track = solution_track,
                 action         = "INVESTIGATE",
@@ -173,7 +175,7 @@ class Hermes:
                 backend        = backend,
             )
 
-        # Allowlist the action (REVIEW P0-3): a prompt-injected verdict could name
+        # Allowlist the action: a prompt-injected verdict could name
         # an arbitrary action string; anything outside the four known verbs is
         # coerced to a held INVESTIGATE so it can never auto-execute a remediation.
         action = parsed.get("action", "INVESTIGATE")
@@ -302,7 +304,7 @@ class Hermes:
         Parse JSON from a Hermes response. Strips markdown fences, then falls
         back to extracting the first {...} block before giving up. Hardened
         against a bare ``` fence (no IndexError) and always logs on failure so
-        a parse error is never silent (audit finding M1).
+        a parse error is never silent.
         """
         raw = raw.strip()
         if raw.startswith("```"):

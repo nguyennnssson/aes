@@ -1,7 +1,7 @@
 """
 Unit tests for the pure detection core: EWMA snapshot rule, sustained low-and-slow
 guard, MIN_BASELINE flooring, baseline freeze, telemetry validation, param
-validation, and the tamper-evident log verifier (REVIEW P1-10, P1-11, P2-16).
+validation, and the tamper-evident log verifier.
 Run: pytest tests/test_detection.py
 """
 from datetime import datetime, timezone

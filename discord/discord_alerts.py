@@ -119,7 +119,7 @@ def post_fleet_status(device_statuses: dict) -> bool:
 def _post(content: str) -> bool:
     """
     Send a message to the Discord webhook. Returns True on success.
-    Hardened (audit finding M3):
+    Hardened:
       - Skips cleanly if no webhook is configured (no crash on empty URL).
       - Truncates to Discord's 2000-char limit.
       - Honors HTTP 429 rate limiting with the server's retry_after, up to 3 tries.

@@ -1,6 +1,6 @@
 """
 Unit tests for response routing: INVESTIGATE / low-confidence / unknown-track
-holds must NOT execute a remediation (REVIEW P0-3, H5). No network needed —
+holds must NOT execute a remediation. No network needed —
 post_incident_alert no-ops without a webhook.
 Run: pytest tests/test_respond.py
 """

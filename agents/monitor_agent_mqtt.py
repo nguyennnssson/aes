@@ -130,7 +130,7 @@ NORMAL_SAMPLE_EVERY = 5
 _fleet_lock = threading.Lock()
 
 # Incident jobs are handed to a background worker so the MQTT callback thread
-# never blocks on Intel/Hermes/gates/flash (REVIEW P0-2). paho delivers messages
+# never blocks on Intel/Hermes/gates/flash. paho delivers messages
 # on ONE thread; running remediation inline blinds the whole fleet for minutes.
 _incident_queue: "queue.Queue" = queue.Queue(maxsize=100)
 
@@ -147,7 +147,7 @@ def on_connect(client, userdata, flags, rc):
         client.subscribe(TOPIC, qos=0)
         print(f"[MONITOR] Connected to Mosquitto — subscribed to '{TOPIC}'")
         print(f"[MONITOR] Watching {len(DEVICE_REGISTRY)} registered devices")
-        print(f"[MONITOR] Waiting for telemetry...\n")
+        print("[MONITOR] Waiting for telemetry...\n")
     else:
         print(f"[MONITOR] Connection failed — rc={rc}")
         sys.exit(1)
@@ -194,7 +194,7 @@ def on_message(client, userdata, msg):
         print(f"[MONITOR] Bad payload on {msg.topic}: {e}")
         return
 
-    # ── Anti-spoof: payload id must match the topic id (REVIEW P1-7) ──────────
+    # ── Anti-spoof: payload id must match the topic id ──────────
     # The topic segment selects which device's baseline we update; the payload id
     # flows into incidents, registry lookups, and Sol 2 IP resolution. If they
     # disagree, a host could poison another device's baseline or trigger a
@@ -260,7 +260,7 @@ def on_message(client, userdata, msg):
     if not result.is_anomaly:
         # Feed the sandbox's false-positive corpus with sampled post-warmup
         # non-incident readings. We sample BOTH "Normal" and "Elevated" readings
-        # (REVIEW P1-6): the elevated-but-benign 25-45% jitter band is exactly
+        # because the elevated-but-benign 25-45% jitter band is exactly
         # what a tightened 0.30-0.35 threshold risks false-positiving on, so
         # excluding it made the FP gate optimistic. Both are ground-truth
         # non-incidents; they keep status="NORMAL" so the sandbox filter is happy.
@@ -391,7 +391,7 @@ def main():
     print("AES — Monitor Agent (MQTT Mode)")
     print(f"Broker : {BROKER_HOST}:{BROKER_PORT}")
     print(f"Topic  : {TOPIC}")
-    print(f"Intel  : embedded SQLite vector index via IntelAgent")
+    print("Intel  : embedded SQLite vector index via IntelAgent")
     print("=" * 60 + "\n")
 
     # Start the incident worker before connecting so no job is ever dropped.
