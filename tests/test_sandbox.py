@@ -133,3 +133,41 @@ def test_skill_approval_refuses_unbenchmarked_or_tampered_params(monkeypatch):
     approved.approve("operator")
     approved.params["deviation_threshold"] = 0.8
     assert not approved.approval_is_valid()
+
+
+def test_label_then_benchmark_cli_reproduces_gate(tmp_path, monkeypatch):
+    """End to end: operator labels samples with scripts/label_sample.py, then the
+    sandbox CLI re-runs the 80% / 10% gate on exactly those signed corpora."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from skills import sandbox
+
+    repo = Path(__file__).resolve().parents[1]
+    env = {**__import__("os").environ, "AES_BENCHMARK_HMAC_KEY": _LABEL_KEY}
+    attacks, normals = tmp_path / "attack_labels.jsonl", tmp_path / "normal_labels.jsonl"
+    samples = [
+        ("ATTACK", attacks, {"cpu": 2.0, "packet_rate": 9.0}),
+        ("ATTACK", attacks, {"cpu": 0.45, "packet_rate": 0.5}),
+        ("NORMAL", normals, {"cpu": 0.1, "packet_rate": 0.05}),
+        ("NORMAL", normals, {"cpu": 0.2, "packet_rate": 0.1}),
+    ]
+    for i, (label, out, deviations) in enumerate(samples):
+        src = tmp_path / f"s{i}.json"
+        src.write_text(json.dumps({"sample_id": f"s{i}", "deviations": deviations}))
+        subprocess.run([sys.executable, str(repo / "scripts" / "label_sample.py"), label,
+                        str(src), str(out), "--reviewer", "test"], check=True, env=env, cwd=repo)
+
+    monkeypatch.setenv("AES_BENCHMARK_HMAC_KEY", _LABEL_KEY)
+    argv = ["--attacks", str(attacks), "--normals", str(normals), "--simultaneous-threshold", "2"]
+    assert sandbox.main(argv + ["--deviation-threshold", "0.35"]) == 0   # 2/2 caught, 0/2 FP
+    assert sandbox.main(argv + ["--deviation-threshold", "0.5"]) == 1    # misses the 45% attack
+
+
+def test_benchmark_corpus_paths_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("AES_BENCHMARK_ATTACKS", str(tmp_path / "a.jsonl"))
+    monkeypatch.setenv("AES_BENCHMARK_NORMALS", str(tmp_path / "n.jsonl"))
+    box = Sandbox()
+    assert box.incidents_path == tmp_path / "a.jsonl"
+    assert box.normals_path == tmp_path / "n.jsonl"
