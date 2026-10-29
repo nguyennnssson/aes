@@ -13,7 +13,7 @@ WHAT IT DOES NOT DO:
   The MQTT subscriber lives in agents/monitor_agent_mqtt.py.
 
 HOW IT FITS IN THE PIPELINE:
-  telemetry (from Vy's ESP32 agent or telemetry_sim.py)
+  telemetry (from Vy's ESP32 agent or scripts/telemetry_sim.py)
     → MQTT → monitor_agent_mqtt.py
     → MonitorAgent.check(telemetry) [this file]
     → AnomalyResult → Intel Agent → Hermes → Response Agent → Discord

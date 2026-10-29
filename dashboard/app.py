@@ -236,7 +236,7 @@ def _bounded_int(value, default=0) -> int:
 def devices(_admin=Depends(_require_admin)):
     """Every device ever seen in fleet_status.json, enriched with registry metadata.
     A device whose last update is older than STALE_AFTER_SECONDS (publisher killed,
-    e.g. telemetry_sim.py stopped) is marked offline rather than dropped, so the web
+    e.g. scripts/telemetry_sim.py stopped) is marked offline rather than dropped, so the web
     app can show it as disconnected instead of just making it disappear."""
     registry = _read_json(REGISTRY, {})
     fleet = _read_json(FLEET, {})

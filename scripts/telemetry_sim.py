@@ -7,11 +7,11 @@ Normal mode: replays real readings from data/telemetry/{device_id}/consolidated.
              devices that have no real data file yet.
 Attack/stealth mode: always uses hardcoded ranges (same as before).
 
-Usage:
-  python telemetry_sim.py                          # all devices, normal mode
-  python telemetry_sim.py --attack esp32-cam-01    # loud attack (defaults catch it)
-  python telemetry_sim.py --attack all             # loud attack on every device
-  python telemetry_sim.py --stealth esp32-cam-01   # low-and-slow: ~45% spikes that the
+Usage (from the repository root):
+  python scripts/telemetry_sim.py                          # all devices, normal mode
+  python scripts/telemetry_sim.py --attack esp32-cam-01    # loud attack (defaults catch it)
+  python scripts/telemetry_sim.py --attack all             # loud attack on every device
+  python scripts/telemetry_sim.py --stealth esp32-cam-01   # low-and-slow: ~45% spikes that the
                                                    # default 0.5 threshold MISSES (for the
                                                    # self-improvement before/after demo)
 
@@ -23,19 +23,23 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agents.mqtt_compat import configure_mqtt_client, make_mqtt_client
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from agents.mqtt_compat import configure_mqtt_client, make_mqtt_client  # noqa: E402
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 BROKER_HOST       = os.getenv("MQTT_HOST", "localhost")
 BROKER_PORT       = int(os.getenv("MQTT_PORT", "8883"))
 PUBLISH_INTERVAL  = 5   # seconds between readings
-TELEMETRY_DIR     = Path("data/telemetry")
-SIM_STATE_PATH    = Path("config/sim_state.json")
+TELEMETRY_DIR     = REPO_ROOT / "data" / "telemetry"
+SIM_STATE_PATH    = REPO_ROOT / "config" / "sim_state.json"
 
 # ─── DEVICE PROFILES (attack + stealth + normal fallback) ────────────────────
 # Normal ranges are only used when no consolidated.json exists for the device.

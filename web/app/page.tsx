@@ -47,7 +47,7 @@ export default function OverviewPage() {
         {devices.length === 0 ? (
           <EmptyState
             title="No connected devices"
-            hint="Start the pipeline or telemetry_sim so devices send signals - they appear here automatically."
+            hint="Start the pipeline or scripts/telemetry_sim.py so devices send signals - they appear here automatically."
           />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

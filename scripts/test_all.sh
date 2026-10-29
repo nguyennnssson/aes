@@ -1,9 +1,9 @@
 #!/bin/bash
 # AES — Full test suite
-# Usage: bash test_all.sh
+# Usage: bash scripts/test_all.sh
 
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 if [[ -f venv/bin/activate ]]; then
     source venv/bin/activate
@@ -44,7 +44,7 @@ python3 -m tests.diagnostic
 
 echo ""
 echo "── Simulation (5s) ──────────────────────"
-python3 -c "import paho.mqtt.client; import telemetry_sim" 2>/dev/null && echo "  ✅  telemetry_sim importable" || echo "  ❌  telemetry_sim import failed"
+python3 -c "import sys; sys.path.insert(0, 'scripts'); import paho.mqtt.client; import telemetry_sim" 2>/dev/null && echo "  ✅  telemetry_sim importable" || echo "  ❌  telemetry_sim import failed"
 
 echo ""
 echo "========================================"

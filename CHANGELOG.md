@@ -2,6 +2,16 @@
 
 Engineering history for AES — Autonomous Edge-Sentinel. Newest first.
 
+## Shorter README, docs/ folder, tidier root
+
+- README cut from 377 to about 130 lines: a Mermaid architecture diagram, CI
+  badges, a status table (tested on hardware / simulated / not yet done / demo
+  data), model routing, the tuning gate, and a quickstart.
+- Full detail moved, unchanged, into `docs/architecture.md`, `docs/models.md`,
+  `docs/intel-index.md`, `docs/tuning-gate.md` and `docs/deployment.md`.
+- `telemetry_sim.py` and `test_all.sh` moved into `scripts/`; the simulator now
+  resolves its data paths from the repository root, so it runs from any folder.
+
 ## Web dependency security update
 
 - Next.js 16.3.1 → 16.4.3 and `npm audit fix` (sharp, source-map-js) to clear

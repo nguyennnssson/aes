@@ -14,8 +14,8 @@ pip install -r requirements.lock
 cp .env.example .env              # then pick backends: Claude and/or Codex/OpenAI
 ```
 
-See the [README](README.md) for the full stack (TLS Mosquitto, Ollama, the local vector index) and
-the model/backend configuration.
+See [docs/deployment.md](docs/deployment.md) for the full stack (TLS Mosquitto, Ollama, the local
+vector index) and [docs/models.md](docs/models.md) for the model/backend configuration.
 
 ## Running the tests
 
